@@ -19,6 +19,8 @@
 
 require('dotenv').config();
 
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const WebSocket = require('ws');
@@ -28,6 +30,7 @@ const tts = require('./elevenlabs-tts.cjs');
 const { toEnglish, fromEnglish, normalizeLanguage } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
 const router = require('./voice-router.cjs');
+const classifier = require('./voice-classifier.cjs');
 const journal = require('./voice-journal.cjs');
 
 const PORT = parseInt(process.env.PORT || '3006', 10);
@@ -37,10 +40,22 @@ const THINKDROP_MAIN_PORT = parseInt(process.env.THINKDROP_MAIN_PORT || '3010', 
 const STATEGRAPH_WS_URL = process.env.STATEGRAPH_WS_URL || 'ws://localhost:4000/ws/stream';
 const STATEGRAPH_API_KEY = process.env.STATEGRAPH_API_KEY || '';
 
+// ── Fast Lane Butler Persona ──────────────────────────────────────────────────
+// Loaded from prompts/fast-lane-butler.md — edit there to change tone/wording.
+function _loadFastLanePrompt() {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'prompts/fast-lane-butler.md'), 'utf8').trim();
+  } catch (_) {
+    return 'You are ThinkDrop\'s voice assistant. Be concise, helpful, and use no markdown.';
+  }
+}
+const FAST_LANE_SYSTEM_PROMPT = _loadFastLanePrompt();
+
 class VoiceServiceMCPServer {
   constructor() {
     this.serviceName = SERVICE_NAME;
     journal.setVoiceStatus('idle');
+    classifier.warmUp();
     logger.info('VoiceServiceMCPServer initialized', { serviceName: this.serviceName });
   }
 
@@ -134,11 +149,23 @@ class VoiceServiceMCPServer {
       return { success: false, error: 'audioBase64 is required' };
     }
 
+    // Minimum audio size guard — ElevenLabs returns 400 for clips under ~3KB decoded.
+    // 4000 bytes decoded ≈ 5333 b64 chars. Accidental taps / silence come in at ~1-2KB.
+    const decodedBytes = Math.floor(audioBase64.length * 3 / 4);
+    if (decodedBytes < 4000) {
+      logger.info('[Pipeline] Skipped — audio too short (likely silence or accidental press)', { decodedBytes });
+      return { success: true, skipped: true, reason: 'audio_too_short' };
+    }
+
     journal.setVoiceStatus('processing');
+    logger.info('[Pipeline] process() called', { audioBase64Len: audioBase64.length, decodedBytes, format, pushToTalk, skipWakeWordCheck });
 
     try {
       // ── Step 1: STT ──
-      const sttResult = await stt.transcribeBase64({ audioBase64, format, languageHint });
+      // Force English for wake word mode — prevents background TV/music being transcribed as foreign languages.
+      // PTT keeps auto-detect (user may speak any language intentionally).
+      const effectiveLanguageHint = (!pushToTalk && !skipWakeWordCheck) ? 'en' : (languageHint || null);
+      const sttResult = await stt.transcribeBase64({ audioBase64, format, languageHint: effectiveLanguageHint });
       logger.info('[Pipeline] STT complete', { text: sttResult.text.substring(0, 80), language: sttResult.language });
 
       if (!sttResult.text.trim()) {
@@ -146,25 +173,37 @@ class VoiceServiceMCPServer {
         return { success: true, skipped: true, reason: 'empty_transcript' };
       }
 
-      // ── Noise filter: reject low-confidence or sound-effect-only transcripts ──
+      // ── Noise filter ──
+      // Strip parenthetical sound-effect labels first, keep actual spoken words
+      const cleanedText = sttResult.text.replace(/\(.*?\)/g, '').trim();
       const confidence = sttResult.confidence || 0;
       const langCode = (sttResult.language || '').toLowerCase().substring(0, 3);
-      const isSoundEffect = /^\s*(\(.*?\)\s*)+\s*$/.test(sttResult.text); // pure "(sound effects)"
-      const isTooShort = sttResult.text.trim().replace(/[^a-z]/gi, '').length < 3;
-      // Wake word mode: require English + confidence ≥ 0.5 (foreign = background noise misdetection)
-      const isWakeWordNoise = !pushToTalk && !skipWakeWordCheck &&
-        (confidence < 0.5 || (langCode !== 'eng' && langCode !== 'en'));
-      // PTT mode: only reject very low confidence
-      const isPttNoise = pushToTalk && confidence < 0.2;
-      if (isSoundEffect || isTooShort || isWakeWordNoise || isPttNoise) {
-        logger.info('[Pipeline] Skipped (noise/low-confidence)', {
-          text: sttResult.text.substring(0, 60),
-          confidence,
-          language: langCode,
-          reason: isSoundEffect ? 'sound_effect' : isTooShort ? 'too_short' : isWakeWordNoise ? 'wake_word_noise' : 'ptt_low_confidence',
-        });
-        journal.setVoiceStatus('idle');
-        return { success: true, skipped: true, reason: 'noise_filtered', transcript: sttResult.text };
+      const isPureSoundEffect = cleanedText.length < 2; // nothing left after stripping
+      const isTooShort = cleanedText.replace(/[^a-zA-Z0-9]/g, '').length < 2;
+
+      if (pushToTalk) {
+        // PTT: user intentionally pressed — reject sound effects, gibberish, and very low confidence
+        const isPttLowConfidence = confidence < 0.3;
+        if (isPureSoundEffect || isTooShort || isPttLowConfidence) {
+          logger.info('[Pipeline] PTT skipped (sound effect/gibberish/low-confidence)', {
+            text: sttResult.text.substring(0, 60), confidence, reason: isPureSoundEffect ? 'sound_effect' : isTooShort ? 'too_short' : 'low_confidence',
+          });
+          journal.setVoiceStatus('idle');
+          return { success: true, skipped: true, reason: 'noise_filtered', transcript: sttResult.text };
+        }
+      } else if (!pushToTalk) {
+        // Wake word mode: require English + confidence ≥ 0.5
+        // Exception: if transcript visibly contains a wake phrase, allow it through anyway
+        const WAKE_PHRASE_QUICK = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|listen\s*up|wake\s*up|i\s*need\s*you|are\s*you\s*there)\b/i;
+        const containsWakePhrase = WAKE_PHRASE_QUICK.test(sttResult.text);
+        const isWakeWordNoise = !containsWakePhrase && (confidence < 0.5 || (langCode !== 'eng' && langCode !== 'en'));
+        if (isWakeWordNoise) {
+          logger.info('[Pipeline] Wake word skipped (low-confidence/non-English/no-wake-phrase)', {
+            text: sttResult.text.substring(0, 60), confidence, language: langCode,
+          });
+          journal.setVoiceStatus('idle');
+          return { success: true, skipped: true, reason: 'noise_filtered', transcript: sttResult.text };
+        }
       }
 
       // ── Step 2: Wake word check (skip if push-to-talk or explicitly bypassed) ──
@@ -173,15 +212,25 @@ class VoiceServiceMCPServer {
 
       if (!pushToTalk && !skipWakeWordCheck) {
         const wakeResult = wakeWord.detect(sttResult.text);
-        if (!wakeResult.detected) {
-          journal.setVoiceStatus('idle');
-          return { success: true, skipped: true, reason: 'no_wake_word', transcript: sttResult.text };
-        }
 
-        if (wakeResult.type === 'cancel' || wakeResult.type === 'status') {
-          sttResult.text = sttResult.text;
+        // If wake phrase detected, strip it and proceed
+        if (wakeResult.detected) {
+          if (wakeResult.type !== 'cancel' && wakeResult.type !== 'status') {
+            sttResult.text = wakeWord.stripWakePhrase(sttResult.text, wakeResult.matchedPhrase);
+          }
         } else {
-          sttResult.text = wakeWord.stripWakePhrase(sttResult.text, wakeResult.matchedPhrase);
+          // No wake phrase — allow through ONLY if transcript starts with a clear question/command word.
+          // Word count alone is not sufficient — background chatter can be 5+ words.
+          const QUESTION_PREFIX = /^(what|where|when|who|why|how|can|could|will|would|should|is|are|do|does|did|tell|show|find|search|open|help|set|make|get|check|remind|play|create|build|run|send|write|schedule|remind|look up|pull up|turn)\b/i;
+          const isRealQuestion = QUESTION_PREFIX.test(cleanedText);
+
+          if (!isRealQuestion) {
+            logger.info('[Pipeline] Wake word skipped — no wake phrase and no clear question/command prefix', { text: sttResult.text.substring(0, 60) });
+            journal.setVoiceStatus('idle');
+            return { success: true, skipped: true, reason: 'no_wake_word', transcript: sttResult.text };
+          }
+          const wordCount = cleanedText.split(/\s+/).filter(Boolean).length;
+          logger.info('[Pipeline] Wake word bypassed — clear question/command prefix detected', { text: sttResult.text.substring(0, 60), wordCount });
         }
       }
 
@@ -190,7 +239,7 @@ class VoiceServiceMCPServer {
       logger.info('[Pipeline] Translation', { wasTranslated, englishText: englishText.substring(0, 80) });
 
       // ── Step 4: Route ──
-      const routeResult = router.route(englishText);
+      const routeResult = await router.route(englishText);
 
       // Write signal to journal if needed (cancel/pause/resume)
       if (routeResult.signalType) {
@@ -202,14 +251,17 @@ class VoiceServiceMCPServer {
       let responseEnglish;
       let responseMetadata = {};
 
+      let fullAnswerEnglish = '';
       if (routeResult.lane === 'fast') {
         const fastResult = await this._fastLaneResponse(englishText, routeResult);
         responseEnglish = fastResult.text;
+        fullAnswerEnglish = fastResult.text;
         responseMetadata = fastResult.metadata || {};
       } else {
         const sgResult = await this._stategraphLaneResponse(englishText, sessionId);
-        responseEnglish = sgResult.text;
-        responseMetadata = sgResult.metadata || {};
+        responseEnglish = sgResult.text;        // spoken summary (short)
+        fullAnswerEnglish = sgResult.fullAnswer || sgResult.text; // full answer for Results window
+        responseMetadata = { ...sgResult.metadata || {}, hadLiveStream: !!sgResult.hadLiveStream };
       }
 
       if (!responseEnglish) {
@@ -217,8 +269,17 @@ class VoiceServiceMCPServer {
         return { success: true, lane: routeResult.lane, transcript: sttResult.text, englishText, response: null };
       }
 
-      // ── Step 6: Translate response back to user language ──
-      const responseInUserLanguage = await fromEnglish(responseEnglish, detectedLanguage);
+      // ── Step 6: Translate spoken summary back to user language for TTS ──
+      // Hard cap at 50 words before translation to keep TTS audio short (< 10s)
+      const MAX_SPOKEN_WORDS = 50;
+      const spokenWords = responseEnglish.trim().split(/\s+/);
+      const cappedEnglish = spokenWords.length > MAX_SPOKEN_WORDS
+        ? spokenWords.slice(0, MAX_SPOKEN_WORDS).join(' ') + '.'
+        : responseEnglish;
+      if (spokenWords.length > MAX_SPOKEN_WORDS) {
+        logger.info('[Pipeline] TTS text capped', { original: spokenWords.length, capped: MAX_SPOKEN_WORDS });
+      }
+      const responseInUserLanguage = await fromEnglish(cappedEnglish, detectedLanguage);
 
       // ── Step 7: TTS ──
       journal.setVoiceStatus('speaking');
@@ -232,7 +293,9 @@ class VoiceServiceMCPServer {
         detectedLanguage,
         wasTranslated,
         englishText,
-        responseEnglish,
+        responseEnglish,          // spoken summary (what was synthesized)
+        fullAnswer: fullAnswerEnglish,  // full answer for Results window display
+        _hadLiveStream: !!(responseMetadata.hadLiveStream),
         responseFinal: responseInUserLanguage,
         audioBase64: ttsResult.audioBuffer.toString('base64'),
         audioFormat: ttsResult.format,
@@ -253,17 +316,17 @@ class VoiceServiceMCPServer {
     if (routeResult.reason === 'cancel_signal') {
       const sgState = journal.read().stategraph;
       if (sgState.status === 'running') {
-        return { text: 'Cancelling the current task now.', metadata: { source: 'journal' } };
+        return { text: 'Right away — cancelling the current task.', metadata: { source: 'journal' } };
       }
-      return { text: "There's nothing running to cancel.", metadata: { source: 'journal' } };
+      return { text: "Nothing is running at the moment, sir. The slate is clean.", metadata: { source: 'journal' } };
     }
 
     if (routeResult.reason === 'pause_signal') {
-      return { text: 'Pausing the current task.', metadata: { source: 'journal' } };
+      return { text: 'Holding position — task paused. Say resume when ready.', metadata: { source: 'journal' } };
     }
 
     if (routeResult.reason === 'resume_signal') {
-      return { text: 'Resuming the task.', metadata: { source: 'journal' } };
+      return { text: 'Back in motion. Resuming where we left off.', metadata: { source: 'journal' } };
     }
 
     if (routeResult.reason === 'fast_intent' || routeResult.reason === 'sg_running_question') {
@@ -277,11 +340,14 @@ class VoiceServiceMCPServer {
 
     // For other fast-lane queries, hit the LLM directly (no StateGraph)
     try {
-      const answer = await this._directLLMQuery(englishText);
+      const answer = await this._directLLMQuery(englishText, FAST_LANE_SYSTEM_PROMPT);
+      if (!answer || !answer.trim()) {
+        return { text: "Consider it noted, though I've nothing to add at the moment.", metadata: { source: 'fast_llm_empty' } };
+      }
       return { text: answer, metadata: { source: 'fast_llm' } };
     } catch (error) {
       logger.error('[FastLane] LLM error', { error: error.message });
-      return { text: "I'm sorry, I couldn't get an answer right now.", metadata: { source: 'error' } };
+      return { text: "My apologies — the circuits are occupied. Try again in a moment.", metadata: { source: 'error' } };
     }
   }
 
@@ -290,7 +356,44 @@ class VoiceServiceMCPServer {
   async _stategraphLaneResponse(englishText, sessionId) {
     try {
       const result = await this._injectIntoStateGraph(englishText, sessionId);
-      return { text: result.answer || result.text || '', metadata: { source: 'stategraph', intent: result.intent } };
+      const fullAnswer = result.answer || result.text || '';
+      const intent = result.intent || 'unknown';
+
+      // For command_automate lanes: answer is empty (streamed to Results window during execution).
+      // Generate a short spoken confirmation instead.
+      if (!fullAnswer || fullAnswer.trim().length === 0) {
+        const confirmation = intent === 'command_automate'
+          ? 'Done.'
+          : "Got it.";
+        logger.info('[StateGraphLane] Command lane — using confirmation', { intent, confirmation });
+        return { text: confirmation, fullAnswer: '', hadLiveStream: !!result.hadLiveStream, metadata: { source: 'stategraph', intent } };
+      }
+
+      // Generate a short spoken summary (≤30 words) — full answer already streamed to Results window.
+      const SUMMARY_WORD_LIMIT = 30;
+      let spokenSummary = fullAnswer;
+      if (fullAnswer.split(/\s+/).length > SUMMARY_WORD_LIMIT) {
+        try {
+          const raw = await this._directLLMQuery(
+            `Reply in ONE sentence of at most 20 words for a voice assistant. No markdown. Just the sentence.\n\nContext: ${fullAnswer.substring(0, 800)}`
+          );
+          // Hard-cap regardless of what LLM returns
+          const words = raw.trim().split(/\s+/);
+          spokenSummary = words.length > SUMMARY_WORD_LIMIT
+            ? words.slice(0, SUMMARY_WORD_LIMIT).join(' ') + '.'
+            : raw.trim();
+          logger.info('[StateGraphLane] Generated spoken summary', { fullWords: fullAnswer.split(/\s+/).length, summaryWords: spokenSummary.split(/\s+/).length });
+        } catch (_) {
+          spokenSummary = fullAnswer.split(/\s+/).slice(0, SUMMARY_WORD_LIMIT).join(' ') + '.';
+        }
+      }
+
+      return {
+        text: spokenSummary,
+        fullAnswer,
+        hadLiveStream: !!result.hadLiveStream,
+        metadata: { source: 'stategraph', intent },
+      };
     } catch (error) {
       logger.error('[StateGraphLane] Error', { error: error.message });
       return { text: "I encountered an error processing your request.", metadata: { source: 'error' } };
@@ -299,7 +402,7 @@ class VoiceServiceMCPServer {
 
   // ─── Direct LLM (fast lane) ───────────────────────────────────────────────────
 
-  _directLLMQuery(text) {
+  _directLLMQuery(text, systemPrompt = null) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(STATEGRAPH_WS_URL, {
         headers: STATEGRAPH_API_KEY ? { Authorization: `Bearer ${STATEGRAPH_API_KEY}` } : {},
@@ -309,7 +412,7 @@ class VoiceServiceMCPServer {
       let fullText = '';
       let settled = false;
       const timeout = setTimeout(() => {
-        if (!settled) { settled = true; ws.close(); resolve(fullText || "I'm not sure about that."); }
+        if (!settled) { settled = true; ws.close(); resolve(fullText || 'Forgive the delay — no answer came in time.'); }
       }, 15000);
 
       ws.on('open', () => {
@@ -318,14 +421,20 @@ class VoiceServiceMCPServer {
           type: 'llm_request',
           payload: {
             prompt: text,
+            provider: 'openai',
             options: {
-              maxTokens: 300,
-              temperature: 0.3,
+              maxTokens: 150,
+              temperature: 0.7,
               taskType: 'conversation',
               responseLength: 'short',
+              stream: true,
+            },
+            context: {
+              systemInstructions: systemPrompt || '',
             },
           },
           timestamp: Date.now(),
+          metadata: { source: 'voice_fast_lane' },
         }));
       });
 
@@ -492,8 +601,17 @@ class VoiceServiceMCPServer {
                 return;
             }
 
+            const responseBody = JSON.stringify({ success: true, data: result });
+            if (req.url === '/voice.process') {
+              logger.info('[voice.process] Sending response', {
+                hasAudio: !!(result && result.audioBase64),
+                audioBytes: result?.audioBase64?.length || 0,
+                lane: result?.lane,
+                skipped: result?.skipped,
+              });
+            }
             res.writeHead(200);
-            res.end(JSON.stringify({ success: true, data: result }));
+            res.end(responseBody);
           } catch (err) {
             logger.error('Request error', { error: err.message, url: req.url });
             res.writeHead(200);

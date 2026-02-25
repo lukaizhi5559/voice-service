@@ -41,18 +41,18 @@ const DEFAULT_WAKE_PHRASES = [
 ];
 
 const DEFAULT_CANCEL_PHRASES = [
-  'stop',
-  'cancel',
-  'abort',
+  'cancel that',
+  'cancel this',
+  'cancel task',
+  'abort that',
+  'abort task',
+  'abort everything',
+  'stop that',
+  'stop everything',
+  'stop the task',
   'nevermind',
   'never mind',
-  'stop that',
-  'cancel that',
-  'abort task',
-  'stop everything',
-  'pause',
-  'hold on',
-  'wait',
+  'forget it',
 ];
 
 const DEFAULT_STATUS_PHRASES = [
@@ -153,17 +153,15 @@ function detect(transcript) {
 function _checkFuse(fuse, text) {
   if (!fuse) return { detected: false, matchedPhrase: null, score: 0 };
 
-  // Search entire text AND individual words for short single-word wake words
-  const results = fuse.search(text);
-  if (results.length > 0 && results[0].score <= _getSensitivity()) {
-    return {
-      detected: true,
-      matchedPhrase: results[0].item.phrase,
-      score: 1 - (results[0].score || 0),
-    };
+  // ── Fast path: exact substring match first (Fuse scores poorly for short needle in long text) ──
+  const phrases = fuse._docs ? fuse._docs.map(d => d.phrase) : [];
+  for (const phrase of phrases) {
+    if (text.includes(phrase)) {
+      return { detected: true, matchedPhrase: phrase, score: 1.0 };
+    }
   }
 
-  // Also check word-by-word for embedded wake words in longer sentences
+  // ── Fuse path: word-by-word chunks for fuzzy/typo variants ──
   const words = text.split(/\s+/);
   for (let i = 0; i < words.length; i++) {
     const chunk = words.slice(Math.max(0, i - 1), i + 3).join(' ');

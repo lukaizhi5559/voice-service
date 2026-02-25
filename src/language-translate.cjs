@@ -40,9 +40,17 @@ const LANGUAGE_NAMES = {
 /**
  * Normalize language codes — map variants to base codes.
  */
+// ISO 639-2 (3-letter) → ISO 639-1 (2-letter) map for common languages
+const ISO3_TO_ISO1 = {
+  eng: 'en', deu: 'de', fra: 'fr', spa: 'es', por: 'pt',
+  ara: 'ar', jpn: 'ja', kor: 'ko', hin: 'hi', ita: 'it',
+  rus: 'ru', zho: 'zh', cmn: 'zh', yue: 'zh',
+};
+
 function normalizeLanguage(langCode) {
   if (!langCode) return 'en';
   const base = langCode.toLowerCase().split('-')[0];
+  if (ISO3_TO_ISO1[base]) return ISO3_TO_ISO1[base];
   if (base === 'zh') return 'zh';
   return base;
 }

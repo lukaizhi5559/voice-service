@@ -57,6 +57,7 @@ async function transcribeAudio({ audio, format = 'wav', languageHint = null }) {
       contentType: _mimeType(format),
     });
     form.append('model_id', 'scribe_v1');
+    form.append('tag_audio_events', 'false'); // disable (laughter)/(music)/(whirring) labels — key noise fix
 
     if (languageHint) {
       form.append('language_code', languageHint);

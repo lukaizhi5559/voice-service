@@ -29,6 +29,7 @@
   "author": "ThinkDrop AI Team",
   "license": "MIT",
   "dependencies": {
+    "@xenova/transformers": "^2.6.0",
     "axios": "^1.6.0",
     "dotenv": "^16.0.0",
     "form-data": "^4.0.0",
