@@ -1,0 +1,46 @@
+{
+  "name": "voice-service",
+  "version": "1.0.0",
+  "description": "Voice MCP service for ThinkDrop AI — STT/TTS via ElevenLabs, wake word detection, multilingual support, StateGraph journal integration",
+  "main": "src/server.cjs",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.cjs",
+    "dev": "nodemon --ignore data/ --ignore tmp/ --ignore logs/ src/server.cjs",
+    "test": "node tests/test-service.cjs"
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "data/*",
+      "*.log",
+      ".temp/*",
+      "tmp/*",
+      "logs/*"
+    ]
+  },
+  "keywords": [
+    "voice",
+    "stt",
+    "tts",
+    "elevenlabs",
+    "mcp",
+    "thinkdrop"
+  ],
+  "author": "ThinkDrop AI Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.0",
+    "form-data": "^4.0.0",
+    "fuse.js": "^7.0.0",
+    "node-record-lpcm16": "^1.0.1",
+    "winston": "^3.11.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
