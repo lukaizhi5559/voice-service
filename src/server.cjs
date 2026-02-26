@@ -369,13 +369,13 @@ class VoiceServiceMCPServer {
         return { text: confirmation, fullAnswer: '', hadLiveStream: !!result.hadLiveStream, metadata: { source: 'stategraph', intent } };
       }
 
-      // Generate a short spoken summary (≤30 words) — full answer already streamed to Results window.
-      const SUMMARY_WORD_LIMIT = 30;
+      // Generate a short spoken summary (≤20 words) — full answer already streamed to Results window.
+      const SUMMARY_WORD_LIMIT = 20;
       let spokenSummary = fullAnswer;
       if (fullAnswer.split(/\s+/).length > SUMMARY_WORD_LIMIT) {
         try {
           const raw = await this._directLLMQuery(
-            `Reply in ONE sentence of at most 20 words for a voice assistant. No markdown. Just the sentence.\n\nContext: ${fullAnswer.substring(0, 800)}`
+            `Reply in ONE sentence of at most 15 words for a voice assistant. No markdown. Just the sentence.\n\nContext: ${fullAnswer.substring(0, 800)}`
           );
           // Hard-cap regardless of what LLM returns
           const words = raw.trim().split(/\s+/);

@@ -34,7 +34,6 @@ const DEFAULT_WAKE_PHRASES = [
   'are you there',
   'wake up',
   'listen up',
-  'i need you',
   'hey assistant',
   'thinky drop',
   'thinkidrop',
@@ -156,7 +155,18 @@ function _checkFuse(fuse, text) {
   // ── Fast path: exact substring match first (Fuse scores poorly for short needle in long text) ──
   const phrases = fuse._docs ? fuse._docs.map(d => d.phrase) : [];
   for (const phrase of phrases) {
-    if (text.includes(phrase)) {
+    // Short phrases (≤3 words) must match at word boundaries to avoid firing mid-sentence.
+    // e.g. "wake up" should not match "I need to wake up my laptop"... well it should,
+    // but "i need you" must not match "I need you to send an email".
+    // Use word-boundary regex for phrases that are common English substrings.
+    const wordCount = phrase.split(/\s+/).length;
+    if (wordCount <= 3) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const boundary = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$|[,!?.])`,'i');
+      if (boundary.test(text)) {
+        return { detected: true, matchedPhrase: phrase, score: 1.0 };
+      }
+    } else if (text.includes(phrase)) {
       return { detected: true, matchedPhrase: phrase, score: 1.0 };
     }
   }
