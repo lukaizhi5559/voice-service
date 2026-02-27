@@ -67,14 +67,37 @@ async function route(englishText) {
     return { lane: 'fast', reason: 'sg_running_question', signalType: null };
   }
 
-  // ── 2.5. Hard stategraph overrides — action-fetch / data-retrieval phrases ──
-  // These patterns sound conversational but need real execution, not an LLM chitchat response.
-  // Must come BEFORE the classifier to prevent "I need to get the weather" → fast lane.
-  if (/\b(get|fetch|find|look up|check|retrieve|pull|search for|show me)\b.{0,40}\b(weather|temperature|forecast|news|stock|price|score|results|data|info|information)\b/i.test(text) ||
-      /\bI need (to get|you to get|the latest|the current)\b/i.test(text) ||
-      /\b(what('?s| is) the (weather|temperature|forecast|news|current))\b/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (action-fetch override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'action_fetch_override', signalType: null };
+  // ── 2.5. Hard stategraph overrides — NARROW, unambiguous patterns only ───────
+  // Rule: only add a hard override if the false-positive risk is near zero.
+  // For anything ambiguous, let the classifier decide (see step 3 bias below).
+
+  // Personal attribute lookup — "what's my name/email/age/etc."
+  // Very low FP risk: "what's my X" almost always means fetch from memory.
+  if (/\bwhat('?s| is) my (name|age|birthday|email|address|phone|job|company)\b/i.test(text)) {
+    logger.info('[Router] → STATEGRAPH LANE (personal-memory override)', { text: text.substring(0, 60) });
+    return { lane: 'stategraph', reason: 'personal_memory_override', signalType: null };
+  }
+
+  // Explicit skill listing — "list skills", "show me your skills", etc.
+  // FP risk is low: these phrases are almost never casual chitchat.
+  if (/\b(list|show me)\b.{0,20}\b(skills?|capabilities|commands|tools)\b/i.test(text)) {
+    logger.info('[Router] → STATEGRAPH LANE (skill-list override)', { text: text.substring(0, 60) });
+    return { lane: 'stategraph', reason: 'skill_list_override', signalType: null };
+  }
+
+  // Data-fetch — "get/fetch/check the weather/news/etc." with an explicit data noun
+  if (/\b(get|fetch|find|look up|check|retrieve|search for)\b.{0,40}\b(weather|temperature|forecast|news|stock|price|score|results)\b/i.test(text) ||
+      /\bwhat('?s| is) the (weather|temperature|forecast|news)\b/i.test(text)) {
+    logger.info('[Router] → STATEGRAPH LANE (data-fetch override)', { text: text.substring(0, 60) });
+    return { lane: 'stategraph', reason: 'data_fetch_override', signalType: null };
+  }
+
+  // Computer action override — "open X", "launch X", "go to X", "close X", "switch to X"
+  // These are always command_automate. ML classifier often misroutes them as chitchat.
+  if (/\b(open|launch|start|close|quit|switch to|go to|navigate to|pull up|bring up)\s+\S/i.test(text) &&
+      !/\b(how (do|can|would)|what is|tell me|explain|why)\b/i.test(text)) {
+    logger.info('[Router] → STATEGRAPH LANE (computer-action override)', { text: text.substring(0, 60) });
+    return { lane: 'stategraph', reason: 'computer_action_override', signalType: null };
   }
 
   // ── 3. Embedding classifier → fast vs stategraph ──────────────────────────

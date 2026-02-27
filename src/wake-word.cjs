@@ -24,19 +24,35 @@ const Fuse = require('fuse.js');
 const logger = require('./logger.cjs');
 
 const DEFAULT_WAKE_PHRASES = [
-  'thinkdrop',
-  'think drop',
-  'hey thinkdrop',
-  'hey think drop',
-  'yo thinkdrop',
-  'ok thinkdrop',
-  'you awake',
-  'are you there',
-  'wake up',
-  'listen up',
-  'hey assistant',
-  'thinky drop',
-  'thinkidrop',
+  // --- Core & Formal ---
+  'armis', 'hey armis', 'hi armis', 'ok armis', 'okay armis', 'hello armis', 
+  'dear armis', 'armis assistant', 'armis system', 'armis help',
+
+  // --- Phonetic & Slurred Variations ---
+  // Accounts for misheard vowels or dropped consonants in noisy rooms
+  'armiss', 'armous', 'armas', 'armus', 'armies', 'ormis', 'ormus', 'ormies',
+  'harmis', 'harness', 'promise', 'armistice', 'amis', 'armless', 'armish',
+  'almis', 'ar-miss', 'are miss', 'arm-us',
+
+  // --- Natural Language & Urgent Triggers ---
+  // Phrases users naturally say when they forget the exact name
+  'you awake', 'are you there', 'wake up', 'listen up', 'hey assistant', 
+  'i need you', 'start listening', 'activate armis', 'system wake', 
+  'excuse me armis', 'pardon me armis', 'can you hear me', 'are you listening',
+  'armis you there', 'i have a question', 'help me out', 'can you help',
+
+  // --- Multi-Syllable "Compound" Triggers ---
+  // 3-4 syllable phrases are the industry "sweet spot" for accuracy
+  'hey there armis', 'yo armis', 'listen armis', 'ready armis', 'go armis',
+  'hey armis assistant', 'ok armis assistant', 'please help armis',
+
+  // --- Catch-all / "Computer" Styles ---
+  // Standard triggers used by major competitors like 
+  'hey computer', 'yo computer', 'listen computer', 'ready computer', 'go computer',
+  'hey computer assistant', 'ok computer assistant', 'please help computer',
+
+  // Amazon and Home Assistant
+  'computer', 'assistant', 'smart assistant', 'hey machine', 'hey bot', 'armis bot'
 ];
 
 const DEFAULT_CANCEL_PHRASES = [
@@ -52,6 +68,14 @@ const DEFAULT_CANCEL_PHRASES = [
   'nevermind',
   'never mind',
   'forget it',
+  'armis stop',
+  'armis cancel',
+  'armis cancel that',
+  'armis abort',
+  'armis never mind',
+  'armis forget it',
+  'stop armis',
+  'cancel armis',
 ];
 
 const DEFAULT_STATUS_PHRASES = [

@@ -117,6 +117,31 @@ const STATEGRAPH_SEEDS = [
   // Conversation / memory store
   'Send an email to John about the project', 'Write a message to the team',
   'Compose a tweet about productivity', 'Draft a reply to that email',
+  // Personal memory retrieval
+  "What's my name", 'What is my name', 'Who am I', 'What do you know about me',
+  'Tell me about myself', 'What is my email', 'What is my job', 'What is my age',
+  'Do you remember my name', 'What have I told you about me',
+  // Skill / capability listing
+  'List all the skills you have', 'Show me all your skills', 'List skills',
+  'What skills do you have', 'What commands can you run', 'What can you automate',
+  'Show me available tools', 'What tools are available', 'List capabilities',
+  // Action-execution commands (typing, saving, creating files)
+  'Type hello world', 'Type out hello world', 'Type this for me',
+  'Save a file on my desktop', 'Create a new file', 'Write a text file',
+  'Open Chrome', 'Click the button', 'Scroll down', 'Press enter',
+  'Run this command', 'Execute the script', 'Launch the app',
+  'Download this file', 'Install the package', 'Create a folder',
+  // Short-form computer actions — most likely to be misclassified as fast/chitchat
+  'Open YouTube', 'Open Spotify', 'Open Slack', 'Open Calendar', 'Open Finder',
+  'Open my email', 'Open Gmail', 'Open my browser', 'Open a new tab',
+  'Launch Chrome', 'Launch Safari', 'Launch Terminal', 'Launch VS Code',
+  'Close Slack', 'Close Chrome', 'Close this window', 'Quit the app',
+  'Switch to Chrome', 'Switch to Slack', 'Switch to Terminal',
+  'Go to YouTube', 'Go to my calendar', 'Go to Gmail', 'Navigate to Google',
+  'Pull up Spotify', 'Bring up Finder', 'Show me my calendar',
+  'Scroll up', 'Scroll down a lot', 'Scroll to the top', 'Scroll to the bottom',
+  'Zoom in', 'Zoom out', 'Make it bigger', 'Make the text larger',
+  'Copy that', 'Paste it', 'Select all', 'Undo that', 'Press tab',
 ];
 
 // ── Classifier state ──────────────────────────────────────────────────────────
@@ -203,7 +228,11 @@ async function classify(text) {
     const fastScore = meanScore(queryEmb, _fastEmbeddings);
     const sgScore   = meanScore(queryEmb, _stategraphEmbeddings);
 
-    const lane = fastScore > sgScore ? 'fast' : 'stategraph';
+    // Bias toward stategraph when scores are close — fast lane should only win
+    // with a clear margin. Prevents action commands (score diff ~0.04) from
+    // slipping into fast lane and getting an LLM description instead of execution.
+    const FAST_BIAS = 0.10;
+    const lane = (fastScore - sgScore) > FAST_BIAS ? 'fast' : 'stategraph';
 
     logger.info('[VoiceClassifier] Classification', {
       text: text.substring(0, 60),

@@ -1,14 +1,10 @@
 /**
- * ElevenLabs TTS — Text-to-speech with multilingual support.
+ * TTS — Text-to-speech with multilingual support.
  *
- * Uses ElevenLabs streaming TTS API with turbo model for low latency.
- * Returns audio as a Buffer (mp3) or streams chunks via callback.
- *
- * Supports automatic voice selection per language:
- *   - English: default configured voice
- *   - Other languages: same voice (ElevenLabs multilingual model handles accent/language)
- *
- * Fallback: macOS `say` command for offline operation.
+ * Provider priority:
+ *   1. Inworld TTS (inworld-tts-1.5-max) — primary
+ *   2. ElevenLabs TTS — second fallback
+ *   3. macOS `say` command — offline last resort
  */
 
 'use strict';
@@ -20,6 +16,13 @@ const { execSync, spawn } = require('child_process');
 const axios = require('axios');
 const logger = require('./logger.cjs');
 
+// ── Inworld TTS ──────────────────────────────────────────────────────────────
+const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice';
+const INWORLD_API_KEY = process.env.INWORLD_API_KEY;  // Basic (Base64) key from platform.inworld.ai
+const INWORLD_VOICE_ID = process.env.INWORLD_VOICE_ID || 'Dennis';
+const INWORLD_MODEL_ID = process.env.INWORLD_MODEL_ID || 'inworld-tts-1.5-max';
+
+// ── ElevenLabs TTS ───────────────────────────────────────────────────────────
 const ELEVENLABS_TTS_BASE = 'https://api.elevenlabs.io/v1/text-to-speech';
 const API_KEY = process.env.ELEVENLABS_API_KEY;
 
@@ -59,43 +62,76 @@ const LANGUAGE_VOICE_MAP = {
  * @returns {Promise<{audioBuffer: Buffer, format: string, durationEstimateMs: number}>}
  */
 async function synthesize({ text, language = 'en', voiceId, stability = 0.5, similarity = 0.75, style = 0.0, onChunk = null }) {
-  if (!API_KEY) {
-    logger.warn('[TTS] ELEVENLABS_API_KEY not set — falling back to native TTS');
-    return synthesizeNative({ text, language });
+  // ── 1. Try Inworld TTS ───────────────────────────────────────────────────
+  if (INWORLD_API_KEY) {
+    try {
+      return await _inworldTTS({ text, language });
+    } catch (err) {
+      logger.warn('[TTS] Inworld failed, trying ElevenLabs', { error: err.message });
+    }
   }
 
-  const selectedVoice = voiceId || LANGUAGE_VOICE_MAP[language] || DEFAULT_VOICE_ID;
+  // ── 2. Try ElevenLabs ────────────────────────────────────────────────────
+  if (API_KEY) {
+    const selectedVoice = voiceId || LANGUAGE_VOICE_MAP[language] || DEFAULT_VOICE_ID;
+    const url = `${ELEVENLABS_TTS_BASE}/${selectedVoice}${onChunk ? '/stream' : ''}`;
+    const body = {
+      text,
+      model_id: MODEL_ID,
+      voice_settings: { stability, similarity_boost: similarity, style, use_speaker_boost: true },
+    };
+    logger.info('[TTS] Synthesizing text (ElevenLabs)', {
+      language, voiceId: selectedVoice, textPreview: text.substring(0, 80), streaming: !!onChunk,
+    });
+    try {
+      if (onChunk) return await _streamingTTS(url, body, onChunk);
+      return await _blockingTTS(url, body);
+    } catch (error) {
+      logger.error('[TTS] ElevenLabs failed, falling back to native', { error: error.message });
+    }
+  }
 
-  const url = `${ELEVENLABS_TTS_BASE}/${selectedVoice}${onChunk ? '/stream' : ''}`;
+  // ── 3. macOS native fallback ─────────────────────────────────────────────
+  logger.warn('[TTS] All cloud TTS unavailable — falling back to native macOS TTS');
+  return synthesizeNative({ text, language });
+}
 
-  const body = {
-    text,
-    model_id: MODEL_ID,
-    voice_settings: {
-      stability,
-      similarity_boost: similarity,
-      style,
-      use_speaker_boost: true,
-    },
-  };
+/**
+ * Inworld TTS — blocking synthesis returning mp3 buffer.
+ */
+async function _inworldTTS({ text, language = 'en' }) {
+  // Hard cap: Inworld allows up to 2000 chars per request
+  const cappedText = text.length > 1900 ? text.substring(0, 1900) + '...' : text;
 
-  logger.info('[TTS] Synthesizing text', {
+  logger.info('[TTS] Synthesizing text (Inworld)', {
     language,
-    voiceId: selectedVoice,
-    textPreview: text.substring(0, 80),
-    streaming: !!onChunk,
+    voiceId: INWORLD_VOICE_ID,
+    textPreview: cappedText.substring(0, 80),
   });
 
-  try {
-    if (onChunk) {
-      return await _streamingTTS(url, body, onChunk);
-    } else {
-      return await _blockingTTS(url, body);
+  const response = await axios.post(
+    INWORLD_TTS_URL,
+    {
+      text: cappedText,
+      voiceId: INWORLD_VOICE_ID,
+      modelId: INWORLD_MODEL_ID,
+    },
+    {
+      headers: {
+        'Authorization': `Basic ${INWORLD_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15000,
     }
-  } catch (error) {
-    logger.error('[TTS] ElevenLabs failed, falling back to native', { error: error.message });
-    return synthesizeNative({ text, language });
-  }
+  );
+
+  const audioContent = response.data?.audioContent;
+  if (!audioContent) throw new Error('Inworld returned no audioContent');
+
+  const audioBuffer = Buffer.from(audioContent, 'base64');
+  const durationEstimateMs = Math.ceil((cappedText.length / 15) * 1000);
+  logger.info('[TTS] Inworld audio generated', { bytes: audioBuffer.length, durationEstimateMs });
+  return { audioBuffer, format: 'mp3', durationEstimateMs };
 }
 
 async function _blockingTTS(url, body) {

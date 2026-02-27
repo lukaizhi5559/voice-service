@@ -25,7 +25,7 @@ const http = require('http');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const logger = require('./logger.cjs');
-const stt = require('./elevenlabs-stt.cjs');
+const stt = require('./stt.cjs');
 const tts = require('./elevenlabs-tts.cjs');
 const { toEnglish, fromEnglish, normalizeLanguage } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
@@ -143,16 +143,38 @@ class VoiceServiceMCPServer {
       skipWakeWordCheck = false,
       pushToTalk = false,
       sessionId,
+      // Web Speech API path: transcript already resolved in renderer — skip STT
+      transcript: preTranscript = null,
+      skipSTT = false,
+      // PTT text-only mode: run STT only, skip LLM/inject, return transcript
+      skipInject = false,
     } = args || {};
+
+    // ── Pre-transcribed path (Web Speech API / native STT) ───────────────────
+    if (skipSTT && preTranscript) {
+      journal.setVoiceStatus('processing');
+      logger.info('[Pipeline] process() called (skipSTT — transcript pre-supplied)', {
+        transcript: preTranscript.substring(0, 80), pushToTalk, skipWakeWordCheck,
+      });
+      // Inject directly into the pipeline at step 2 with a synthetic sttResult
+      const sttResult = { text: preTranscript, language: languageHint || 'en', confidence: 1.0, isFinal: true };
+      try {
+        return await this._runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+      } catch (err) {
+        logger.error('[Pipeline] Error in skipSTT path', { error: err.message });
+        journal.setVoiceStatus('idle');
+        return { success: false, error: err.message };
+      }
+    }
 
     if (!audioBase64) {
       return { success: false, error: 'audioBase64 is required' };
     }
 
-    // Minimum audio size guard — ElevenLabs returns 400 for clips under ~3KB decoded.
-    // 4000 bytes decoded ≈ 5333 b64 chars. Accidental taps / silence come in at ~1-2KB.
+    // Minimum audio size guard — accidental taps / silence come in at ~0.5-1KB decoded.
+    // PTT presses can legitimately be short (1-2 words), so threshold is 1500 decoded bytes.
     const decodedBytes = Math.floor(audioBase64.length * 3 / 4);
-    if (decodedBytes < 4000) {
+    if (decodedBytes < 1500) {
       logger.info('[Pipeline] Skipped — audio too short (likely silence or accidental press)', { decodedBytes });
       return { success: true, skipped: true, reason: 'audio_too_short' };
     }
@@ -173,6 +195,16 @@ class VoiceServiceMCPServer {
         return { success: true, skipped: true, reason: 'empty_transcript' };
       }
 
+      return await this._runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+    } catch (err) {
+      logger.error('[Pipeline] Error', { error: err.message });
+      journal.setVoiceStatus('idle');
+      return { success: false, error: err.message };
+    }
+  }
+
+  async _runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject = false }) {
+    try {
       // ── Noise filter ──
       // Strip parenthetical sound-effect labels first, keep actual spoken words
       const cleanedText = sttResult.text.replace(/\(.*?\)/g, '').trim();
@@ -182,12 +214,10 @@ class VoiceServiceMCPServer {
       const isTooShort = cleanedText.replace(/[^a-zA-Z0-9]/g, '').length < 2;
 
       if (pushToTalk) {
-        // PTT: user intentionally pressed — reject sound effects, gibberish, and very low confidence
-        const isPttLowConfidence = confidence < 0.3;
-        if (isPureSoundEffect || isTooShort || isPttLowConfidence) {
-          logger.info('[Pipeline] PTT skipped (sound effect/gibberish/low-confidence)', {
-            text: sttResult.text.substring(0, 60), confidence, reason: isPureSoundEffect ? 'sound_effect' : isTooShort ? 'too_short' : 'low_confidence',
-          });
+        // PTT: user intentionally pressed — only reject pure sound effects (e.g. "[music]").
+        // Do NOT filter on confidence (Groq returns 0 by default) or short transcripts.
+        if (isPureSoundEffect) {
+          logger.info('[Pipeline] PTT skipped (pure sound effect)', { text: sttResult.text.substring(0, 60) });
           journal.setVoiceStatus('idle');
           return { success: true, skipped: true, reason: 'noise_filtered', transcript: sttResult.text };
         }
@@ -221,7 +251,7 @@ class VoiceServiceMCPServer {
         } else {
           // No wake phrase — allow through ONLY if transcript starts with a clear question/command word.
           // Word count alone is not sufficient — background chatter can be 5+ words.
-          const QUESTION_PREFIX = /^(what|where|when|who|why|how|can|could|will|would|should|is|are|do|does|did|tell|show|find|search|open|help|set|make|get|check|remind|play|create|build|run|send|write|schedule|remind|look up|pull up|turn)\b/i;
+          const QUESTION_PREFIX = /^(what|where|when|who|why|how|can|could|will|would|should|is|are|do|does|did|tell|show|find|search|open|help|set|make|get|check|remind|play|create|build|run|send|write|schedule|look up|pull up|turn|type|scroll|press|click|focus|paste|copy|undo|tab|enter|install|list|go to|navigate|switch|close|minimize|maximize|use|using|i want|i need|i would|i('m| am)|i notice|now |let'?s|try|analyze|analyse|examine|delete|remove|save|show me|take|move|rename|read|launch|start|stop|enable|disable|download|upload|please|just|could you|can you|will you|would you|you('re| are| can| should| need| must| never| didn'?t| don'?t| haven'?t| weren'?t| aren'?t)|you just|you only|you still|that'?s|that is|no you|hey you|actually|wait|hold on|never mind|forget that|also|and then|then|after that|next|but|however|instead|again|redo|retry|fix|correct|update)\b/i;
           const isRealQuestion = QUESTION_PREFIX.test(cleanedText);
 
           if (!isRealQuestion) {
@@ -251,6 +281,21 @@ class VoiceServiceMCPServer {
       let responseEnglish;
       let responseMetadata = {};
 
+      // PTT text-only: skip all LLM/TTS, return transcript immediately after routing
+      if (skipInject) {
+        logger.info('[Pipeline] skipInject=true — returning transcript only', { transcript: sttResult.text.substring(0, 60) });
+        journal.setVoiceStatus('idle');
+        return {
+          success: true,
+          lane: routeResult.lane,
+          transcript: sttResult.text,
+          detectedLanguage,
+          wasTranslated,
+          englishText,
+          skipped: false,
+        };
+      }
+
       let fullAnswerEnglish = '';
       if (routeResult.lane === 'fast') {
         const fastResult = await this._fastLaneResponse(englishText, routeResult);
@@ -269,7 +314,7 @@ class VoiceServiceMCPServer {
         return { success: true, lane: routeResult.lane, transcript: sttResult.text, englishText, response: null };
       }
 
-      // ── Step 6: Translate spoken summary back to user language for TTS ──
+      // ── Step 6: TTS — both lanes synthesize audio ────────────────────────────
       // Hard cap at 50 words before translation to keep TTS audio short (< 10s)
       const MAX_SPOKEN_WORDS = 50;
       const spokenWords = responseEnglish.trim().split(/\s+/);
@@ -281,7 +326,6 @@ class VoiceServiceMCPServer {
       }
       const responseInUserLanguage = await fromEnglish(cappedEnglish, detectedLanguage);
 
-      // ── Step 7: TTS ──
       journal.setVoiceStatus('speaking');
       const ttsResult = await tts.synthesize({ text: responseInUserLanguage, language: detectedLanguage });
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
@@ -293,8 +337,8 @@ class VoiceServiceMCPServer {
         detectedLanguage,
         wasTranslated,
         englishText,
-        responseEnglish,          // spoken summary (what was synthesized)
-        fullAnswer: fullAnswerEnglish,  // full answer for Results window display
+        responseEnglish,
+        fullAnswer: fullAnswerEnglish,
         _hadLiveStream: !!(responseMetadata.hadLiveStream),
         responseFinal: responseInUserLanguage,
         audioBase64: ttsResult.audioBuffer.toString('base64'),
