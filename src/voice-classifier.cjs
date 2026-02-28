@@ -248,4 +248,146 @@ async function classify(text) {
   }
 }
 
-module.exports = { warmUp, classify };
+// ── Action-confirmation seeds — what a fast-lane LLM says when it PRETENDS to act ──
+// These are responses that sound like the LLM is about to do something but won't.
+// If the fast lane returns text matching these patterns, the original user prompt
+// should be escalated to stategraph for actual execution.
+const ACTION_CONFIRM_SEEDS = [
+  // "Consider it done" variants
+  'Consider it done', 'Consider it handled', 'Done', 'All done', 'It is done',
+  'That is done', 'Done for you', 'Done right away',
+  // "On it" / "Right away" variants
+  'On it', "I'm on it", 'Right away', 'On it right away', 'Right on it',
+  'Getting on it now', 'Already on it', 'Absolutely, on it',
+  // "I will / I'll do that" variants
+  "I'll do that", "I'll do that for you", "I'll handle that", "I'll take care of it",
+  "I'll take care of that", "I'll get that done", "I'll get right on it",
+  "I'll close that", "I'll open that", "I'll run that", "I'll execute that",
+  "I will do that", "I will handle that", "I will take care of that",
+  "I will close it", "I will open it", "I will run it",
+  // "Doing it now" / "Closing/Opening now"
+  'Doing it now', 'Closing now', 'Closing it now', 'Opening now', 'Opening it now',
+  'Running now', 'Executing now', 'Launching now', 'Launching it now',
+  'Closing Zoom now', 'Opening Chrome now', 'Switching now',
+  // "Let me X" variants
+  'Let me do that', 'Let me handle that', 'Let me take care of that',
+  'Let me close that', 'Let me open that', 'Let me run that',
+  'Let me get that done', 'Let me get right on it',
+  // "Completing / Executing / Processing"
+  'Completing that now', 'Executing that now', 'Processing your request',
+  'Processing that request', 'Handling that now', 'Taking care of that now',
+  // "Sure / Absolutely / Of course" + action
+  'Sure, closing that', 'Sure, opening that', 'Absolutely, closing that',
+  'Of course, right away', 'Certainly, on it', 'Sure thing, on it',
+  // Stall + action intention
+  'One moment', 'One moment please', 'Just a moment', 'Hold on',
+  'Working on it', 'Performing that action', 'Carry out that request',
+  // Tool-specific action verbs (in-progress)
+  'Updating now', 'Searching now', 'Sending now', 'Scheduling now',
+  'Downloading now', 'Uploading now', 'Installing now', 'Deleting now',
+  'Creating now', 'Moving now', 'Copying now', 'Saving now',
+  'Running the command', 'Executing the script', 'Launching the app',
+  'Submitting now', 'Posting now', 'Filing now', 'Booking now',
+  // Common LLM action-speak phrases
+  "I've got you covered", 'Consider it vanished', 'As you wish',
+  "I'll see to it", "I shall handle it", "Executing your command",
+  "Your request is being processed", "Initiating that now",
+  "That will be done", "Carrying that out now", "On it straight away",
+  // Butler routing acknowledgments — exact phrases from fast-lane-butler.md prompt
+  "Routing that to ThinkDrop now", "Passing that along to ThinkDrop",
+  "ThinkDrop will handle that", "On its way to ThinkDrop",
+  "Passing that along", "Consider it queued",
+];
+
+// Chitchat/informational response seeds — the LLM is ANSWERING, not acting
+const ANSWER_SEEDS = [
+  // Information delivery
+  "Here's what I found", 'The answer is', 'According to', 'Based on',
+  'I believe', 'I think', 'In my opinion', 'From what I know',
+  // Conversational replies
+  "I'm doing well", "I'm fine", "I'm great", "I'm just an AI",
+  "I don't have feelings", "I can't do that", "I don't know",
+  'That is a great question', 'Good question', "I'm not sure",
+  "I don't have access", "I'm unable to", "I cannot",
+  // Explanations
+  'The reason is', 'This is because', 'To explain', 'In short',
+  'Basically', 'The way it works is', 'Think of it as',
+  // Greetings/small talk
+  'Hello', 'Hi there', 'Hey', 'Good to hear from you', 'Nice to meet you',
+  'How can I help you', 'What can I do for you', 'How are you doing',
+  // Memory/context answers
+  "You've been working on", "According to your history", "I remember you said",
+  "Based on our conversation", "Your last task was", "Earlier you mentioned",
+  // Polite refusals / capability statements — NOT actions, must not escalate
+  "I'm sorry, I can't do that", "I don't have permission to do that",
+  "I'm unable to perform that action", "That's outside my capabilities",
+  "I cannot access that", "I don't have the ability to",
+  "I can do that for you", "That is something I can help with",
+  "Sure, I can help with that", "I'd be happy to help with that",
+];
+
+let _actionConfirmEmbeddings = null;
+let _answerEmbeddings = null;
+
+async function _ensureActionConfirmEmbeddings() {
+  if (_actionConfirmEmbeddings) return;
+  // Reuse the already-initialized pipeline
+  if (!_initialized) {
+    if (_initPromise) await _initPromise;
+    else { warmUp(); await _initPromise; }
+  }
+  const embedder = await getPipeline();
+  [_actionConfirmEmbeddings, _answerEmbeddings] = await Promise.all([
+    Promise.all(ACTION_CONFIRM_SEEDS.map(s => embed(embedder, s))),
+    Promise.all(ANSWER_SEEDS.map(s => embed(embedder, s))),
+  ]);
+}
+
+/**
+ * Classify an LLM response to determine if it's an action confirmation
+ * (fast lane pretended to act but didn't) vs an actual answer.
+ *
+ * Returns { isActionConfirmation: boolean, actionScore: number, answerScore: number }
+ * If isActionConfirmation is true, the original user prompt should be escalated
+ * to stategraph for actual execution.
+ *
+ * @param {string} responseText - The LLM's response text from fast lane
+ * @returns {Promise<{ isActionConfirmation: boolean, actionScore: number, answerScore: number }>}
+ */
+async function classifyLLMResponse(responseText) {
+  try {
+    await _ensureActionConfirmEmbeddings();
+    const embedder = await getPipeline();
+
+    // LLMs front-load their intent — "That sounds like a plan! I'll get right on it."
+    // Classifying the full text lets conversational fluff dilute the action signal.
+    // Extract just the first sentence (up to first '.', '!', or '?').
+    const firstSentenceMatch = responseText.match(/^[^.!?]+[.!?]/);
+    const classifyText = firstSentenceMatch
+      ? firstSentenceMatch[0].trim()
+      : responseText.substring(0, 120).trim();
+
+    const queryEmb = await embed(embedder, classifyText);
+
+    const actionScore = meanScore(queryEmb, _actionConfirmEmbeddings);
+    const answerScore = meanScore(queryEmb, _answerEmbeddings);
+
+    // Action confirmation wins if it leads by > 0.05
+    const ACTION_BIAS = 0.05;
+    const isActionConfirmation = (actionScore - answerScore) > ACTION_BIAS;
+
+    logger.info('[VoiceClassifier] LLM response classification', {
+      classifiedText: classifyText.substring(0, 80),
+      actionScore: actionScore.toFixed(3),
+      answerScore: answerScore.toFixed(3),
+      isActionConfirmation,
+    });
+
+    return { isActionConfirmation, actionScore, answerScore };
+  } catch (err) {
+    logger.error('[VoiceClassifier] classifyLLMResponse() error', { error: err.message });
+    return { isActionConfirmation: false, actionScore: 0, answerScore: 0 };
+  }
+}
+
+module.exports = { warmUp, classify, classifyLLMResponse };

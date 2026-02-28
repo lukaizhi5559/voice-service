@@ -41,16 +41,26 @@ async function transcribe({ audioBuffer, format = 'wav', languageHint = null }) 
   });
 
   try {
+    // Language-appropriate decoder seed prompts — biases Whisper output toward the correct script.
+    // Short words only: long sentences leak into output on silent audio.
+    const LANG_PROMPTS = {
+      zh: '好的，搜索，打开，',
+      ja: 'はい、検索、開く、',
+      ko: '네, 검색, 열기,',
+      ar: 'حسنًا، بحث، افتح،',
+      ru: 'хорошо, поиск, открыть,',
+      hi: 'ठीक है, खोजें, खोलें,',
+    };
+    const effectiveLang = languageHint || 'en';
+    const decoderPrompt = LANG_PROMPTS[effectiveLang] || 'okay, search, open, scroll, hey,';
+
     const params = {
       file: fs.createReadStream(tmpFile),
       model: GROQ_MODEL,
       response_format: 'json',
       temperature: 0.0,
-      // Lock to English — prevents language misdetect on short/noisy clips (especially AirPod BT audio).
-      // prompt is a short prior-utterance hint to seed decoder context (not an instruction sentence —
-      // long sentences leak into the output on silent audio).
-      language: languageHint || 'en',
-      prompt: 'okay, search, open, scroll, hey,',
+      language: effectiveLang,
+      prompt: decoderPrompt,
     };
 
     const transcription = await groq.audio.transcriptions.create(params);

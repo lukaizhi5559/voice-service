@@ -168,14 +168,40 @@ function needsTranslation(langCode) {
 }
 
 /**
- * Full pipeline: detect language (from STT result) → translate to English if needed.
- *
- * @param {Object} sttResult - Result from ElevenLabs Scribe: { text, language, confidence }
- * @returns {Promise<{englishText: string, originalText: string, detectedLanguage: string, wasTranslated: boolean}>}
+ * Script-based language override: if Groq/STT reports 'en' but the text
+ * contains a dominant non-Latin script, trust the script over the tag.
+ * Groq Whisper-large-v3-turbo sometimes returns language='en' for mixed or
+ * short Chinese utterances — this catches it.
  */
+function detectScriptLanguage(text) {
+  const cjk = (text.match(/[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/g) || []).length;
+  const arabic = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const cyrillic = (text.match(/[\u0400-\u04FF]/g) || []).length;
+  const devanagari = (text.match(/[\u0900-\u097F]/g) || []).length;
+  const hangul = (text.match(/[\uAC00-\uD7AF\u1100-\u11FF]/g) || []).length;
+  const hiragana = (text.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
+  const total = text.replace(/\s/g, '').length || 1;
+
+  if (cjk / total > 0.15) return hiragana > cjk * 0.3 ? 'ja' : 'zh';
+  if (hangul / total > 0.15) return 'ko';
+  if (arabic / total > 0.15) return 'ar';
+  if (cyrillic / total > 0.15) return 'ru';
+  if (devanagari / total > 0.15) return 'hi';
+  return null;
+}
+
 async function toEnglish(sttResult) {
   const { text, language } = sttResult;
-  const detectedLanguage = normalizeLanguage(language || 'en');
+  let detectedLanguage = normalizeLanguage(language || 'en');
+
+  // Override if STT reports English but text is clearly a non-Latin script
+  if (detectedLanguage === 'en') {
+    const scriptLang = detectScriptLanguage(text);
+    if (scriptLang) {
+      logger.info('[Translate] Script-override: STT said en but detected script', { scriptLang, textPreview: text.substring(0, 40) });
+      detectedLanguage = scriptLang;
+    }
+  }
 
   if (!needsTranslation(detectedLanguage)) {
     return {
@@ -206,6 +232,15 @@ async function toEnglish(sttResult) {
 async function fromEnglish(englishText, targetLanguage) {
   const lang = normalizeLanguage(targetLanguage);
   if (lang === 'en') return englishText;
+
+  // Skip API call if text is already in the target script (avoid Chinese→Chinese round-trip).
+  // This happens when the LLM already replied in the target language (e.g. fast lane with
+  // language suffix injected into system prompt).
+  const alreadyInScript = detectScriptLanguage(englishText);
+  if (alreadyInScript === lang) return englishText;
+  // CJK family: if target is zh/ja/ko and text has CJK, trust it
+  const CJK_LANGS = new Set(['zh', 'ja', 'ko']);
+  if (CJK_LANGS.has(lang) && alreadyInScript && CJK_LANGS.has(alreadyInScript)) return englishText;
 
   const { translated } = await translate({ text: englishText, fromLanguage: 'en', toLanguage: lang });
   return translated;

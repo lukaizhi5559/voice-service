@@ -26,11 +26,12 @@ const crypto = require('crypto');
 const WebSocket = require('ws');
 const logger = require('./logger.cjs');
 const stt = require('./stt.cjs');
-const tts = require('./elevenlabs-tts.cjs');
-const { toEnglish, fromEnglish, normalizeLanguage } = require('./language-translate.cjs');
+const tts = require('./inworld-tts.cjs');
+const voiceProvider = require('./voice-provider.cjs');
+const { toEnglish, fromEnglish, normalizeLanguage, LANGUAGE_NAMES } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
 const router = require('./voice-router.cjs');
-const classifier = require('./voice-classifier.cjs');
+const { warmUp: classifierWarmUp, classifyLLMResponse } = require('./voice-classifier.cjs');
 const journal = require('./voice-journal.cjs');
 
 const PORT = parseInt(process.env.PORT || '3006', 10);
@@ -55,7 +56,7 @@ class VoiceServiceMCPServer {
   constructor() {
     this.serviceName = SERVICE_NAME;
     journal.setVoiceStatus('idle');
-    classifier.warmUp();
+    classifierWarmUp();
     logger.info('VoiceServiceMCPServer initialized', { serviceName: this.serviceName });
   }
 
@@ -136,6 +137,13 @@ class VoiceServiceMCPServer {
    * }} args
    */
   async process(args) {
+    // ── Hume EVI path — replaces entire STT→LLM→TTS pipeline ─────────────────
+    // EVI handles speech-to-speech internally. We intercept action intents via
+    // the trigger_stategraph tool call and forward them to StateGraph.
+    if (voiceProvider.isHumeEVI() && (args?.audioBase64) && !args?.skipSTT) {
+      return this._processWithHumeEVI(args);
+    }
+
     const {
       audioBase64,
       format = 'wav',
@@ -184,10 +192,13 @@ class VoiceServiceMCPServer {
 
     try {
       // ── Step 1: STT ──
-      // Force English for wake word mode — prevents background TV/music being transcribed as foreign languages.
-      // PTT keeps auto-detect (user may speak any language intentionally).
-      const effectiveLanguageHint = (!pushToTalk && !skipWakeWordCheck) ? 'en' : (languageHint || null);
-      const sttResult = await stt.transcribeBase64({ audioBase64, format, languageHint: effectiveLanguageHint });
+      // Always auto-detect language — Whisper handles multilingual input correctly.
+      // The noise filter below rejects truly unexpected non-English in wake word mode.
+      // Forcing 'en' here would cause Chinese/Spanish/etc. speech to be mangled.
+      // STT_LANGUAGE_HINT env var forces a specific language (e.g. 'zh') when the user
+      // speaks a language that Groq Whisper tends to hallucinate as English phonetics.
+      const effectiveLanguageHint = languageHint || process.env.STT_LANGUAGE_HINT || null;
+      const sttResult = await voiceProvider.transcribe({ audioBase64, format, languageHint: effectiveLanguageHint });
       logger.info('[Pipeline] STT complete', { text: sttResult.text.substring(0, 80), language: sttResult.language });
 
       if (!sttResult.text.trim()) {
@@ -222,13 +233,14 @@ class VoiceServiceMCPServer {
           return { success: true, skipped: true, reason: 'noise_filtered', transcript: sttResult.text };
         }
       } else if (!pushToTalk) {
-        // Wake word mode: require English + confidence ≥ 0.5
-        // Exception: if transcript visibly contains a wake phrase, allow it through anyway
+        // Wake word mode: filter out low-confidence noise only.
+        // Do NOT filter on language — user may intentionally speak Chinese, Spanish, etc.
+        // Exception: if transcript contains a wake phrase, always allow through.
         const WAKE_PHRASE_QUICK = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|listen\s*up|wake\s*up|i\s*need\s*you|are\s*you\s*there)\b/i;
         const containsWakePhrase = WAKE_PHRASE_QUICK.test(sttResult.text);
-        const isWakeWordNoise = !containsWakePhrase && (confidence < 0.5 || (langCode !== 'eng' && langCode !== 'en'));
-        if (isWakeWordNoise) {
-          logger.info('[Pipeline] Wake word skipped (low-confidence/non-English/no-wake-phrase)', {
+        const isLowConfidenceNoise = !containsWakePhrase && confidence > 0 && confidence < 0.5;
+        if (isLowConfidenceNoise) {
+          logger.info('[Pipeline] Wake word skipped (low-confidence noise)', {
             text: sttResult.text.substring(0, 60), confidence, language: langCode,
           });
           journal.setVoiceStatus('idle');
@@ -239,6 +251,10 @@ class VoiceServiceMCPServer {
       // ── Step 2: Wake word check (skip if push-to-talk or explicitly bypassed) ──
       const detectedLanguage = normalizeLanguage(sttResult.language);
       journal.setVoiceStatus('processing', { detectedLanguage });
+      // Persist session language as single source of truth — answer.js reads this directly
+      if (detectedLanguage && detectedLanguage !== 'en') {
+        journal.setSessionLanguage(detectedLanguage);
+      }
 
       if (!pushToTalk && !skipWakeWordCheck) {
         const wakeResult = wakeWord.detect(sttResult.text);
@@ -298,12 +314,12 @@ class VoiceServiceMCPServer {
 
       let fullAnswerEnglish = '';
       if (routeResult.lane === 'fast') {
-        const fastResult = await this._fastLaneResponse(englishText, routeResult);
+        const fastResult = await this._fastLaneResponse(englishText, routeResult, detectedLanguage);
         responseEnglish = fastResult.text;
         fullAnswerEnglish = fastResult.text;
         responseMetadata = fastResult.metadata || {};
       } else {
-        const sgResult = await this._stategraphLaneResponse(englishText, sessionId);
+        const sgResult = await this._stategraphLaneResponse(englishText, sessionId, detectedLanguage);
         responseEnglish = sgResult.text;        // spoken summary (short)
         fullAnswerEnglish = sgResult.fullAnswer || sgResult.text; // full answer for Results window
         responseMetadata = { ...sgResult.metadata || {}, hadLiveStream: !!sgResult.hadLiveStream };
@@ -326,8 +342,34 @@ class VoiceServiceMCPServer {
       }
       const responseInUserLanguage = await fromEnglish(cappedEnglish, detectedLanguage);
 
+      // Translate fullAnswer + responseEnglish for ResultsWindow display when non-English.
+      // Use sessionLanguage from journal as fallback when wasTranslated is false
+      // (e.g. Groq returned language='zh' directly so no translation was needed, but
+      // the fast lane LLM reply was generated in English and must be translated back).
+      const displayLang = (detectedLanguage && detectedLanguage !== 'en')
+        ? detectedLanguage
+        : (journal.read().voice?.sessionLanguage || 'en');
+      const needsDisplayTranslation = displayLang !== 'en';
+
+      let fullAnswerDisplay = fullAnswerEnglish;
+      let responseDisplay = responseEnglish;
+      if (needsDisplayTranslation) {
+        try {
+          // Translate both independently — fast lane has responseEnglish === fullAnswerEnglish,
+          // stategraph lane may have different strings. Always translate responseDisplay.
+          const translateFull = fullAnswerEnglish
+            ? fromEnglish(fullAnswerEnglish, displayLang).catch(() => fullAnswerEnglish)
+            : Promise.resolve(fullAnswerEnglish);
+          const translateResp = responseEnglish
+            ? fromEnglish(responseEnglish, displayLang).catch(() => responseEnglish)
+            : Promise.resolve(responseEnglish);
+          [fullAnswerDisplay, responseDisplay] = await Promise.all([translateFull, translateResp]);
+          logger.info('[Pipeline] Display text translated', { displayLang, lane: routeResult.lane });
+        } catch (_) {}
+      }
+
       journal.setVoiceStatus('speaking');
-      const ttsResult = await tts.synthesize({ text: responseInUserLanguage, language: detectedLanguage });
+      const ttsResult = await voiceProvider.synthesize({ text: responseInUserLanguage, language: detectedLanguage });
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
 
       return {
@@ -337,8 +379,8 @@ class VoiceServiceMCPServer {
         detectedLanguage,
         wasTranslated,
         englishText,
-        responseEnglish,
-        fullAnswer: fullAnswerEnglish,
+        responseEnglish: responseDisplay,
+        fullAnswer: fullAnswerDisplay,
         _hadLiveStream: !!(responseMetadata.hadLiveStream),
         responseFinal: responseInUserLanguage,
         audioBase64: ttsResult.audioBuffer.toString('base64'),
@@ -355,7 +397,7 @@ class VoiceServiceMCPServer {
 
   // ─── Fast Lane ────────────────────────────────────────────────────────────────
 
-  async _fastLaneResponse(englishText, routeResult) {
+  async _fastLaneResponse(englishText, routeResult, responseLanguage = null) {
     // Status queries — answer from journal without hitting LLM
     if (routeResult.reason === 'cancel_signal') {
       const sgState = journal.read().stategraph;
@@ -383,11 +425,67 @@ class VoiceServiceMCPServer {
     }
 
     // For other fast-lane queries, hit the LLM directly (no StateGraph)
+    // Inject sessionLanguage from journal so the LLM replies in the user's language directly.
+    const _fastLang = journal.read().voice?.sessionLanguage || responseLanguage || 'en';
+    const _fastSystemPrompt = (_fastLang && _fastLang !== 'en')
+      ? `${FAST_LANE_SYSTEM_PROMPT}\n\nIMPORTANT: The user is speaking ${LANGUAGE_NAMES[_fastLang] || _fastLang}. You MUST respond entirely in ${LANGUAGE_NAMES[_fastLang] || _fastLang}. Do not use English.`
+      : FAST_LANE_SYSTEM_PROMPT;
     try {
-      const answer = await this._directLLMQuery(englishText, FAST_LANE_SYSTEM_PROMPT);
+      const answer = await this._directLLMQuery(englishText, _fastSystemPrompt);
       if (!answer || !answer.trim()) {
         return { text: "Consider it noted, though I've nothing to add at the moment.", metadata: { source: 'fast_llm_empty' } };
       }
+
+      // ── Action escalation: classify LLM response ──────────────────────────
+      // If the LLM replied with action-confirmation language ("I'll do that",
+      // "Consider it done", "Closing now", etc.) the fast lane has no ability
+      // to actually execute — escalate the original user prompt to stategraph
+      // in the background so the real action runs while TTS plays.
+      // The stategraph result (including its own TTS) is sent to the renderer
+      // via the /voice/result overlay endpoint after execution completes.
+      classifyLLMResponse(answer).then(async ({ isActionConfirmation }) => {
+        if (!isActionConfirmation) return;
+        logger.info('[FastLane] Action escalation — routing original prompt to stategraph', {
+          prompt: englishText.substring(0, 80),
+          response: answer.substring(0, 80),
+        });
+        try {
+          const escalationLang = journal.read().voice?.sessionLanguage || 'en';
+          const sgResult = await this._stategraphLaneResponse(englishText, null, escalationLang !== 'en' ? escalationLang : null);
+          if (!sgResult.text) return;
+          // Translate spoken summary back to user's language before TTS
+          const ttsLang = (escalationLang && escalationLang !== 'en') ? escalationLang : 'en';
+          const spokenText = (ttsLang !== 'en') ? await fromEnglish(sgResult.text, ttsLang).catch(() => sgResult.text) : sgResult.text;
+          // Synthesize TTS for the stategraph spoken summary
+          const ttsResult = await voiceProvider.synthesize({ text: spokenText, language: ttsLang }).catch(() => null);
+          if (!ttsResult) return;
+          // POST result back to main process so it forwards voice:response to renderer
+          const http_module = require('http');
+          const payload = JSON.stringify({
+            text: sgResult.text,
+            fullAnswer: sgResult.fullAnswer || sgResult.text,
+            audioBase64: ttsResult.audioBuffer.toString('base64'),
+            audioFormat: ttsResult.format || 'mp3',
+            language: ttsLang,
+            lane: 'stategraph',
+            durationEstimateMs: ttsResult.durationEstimateMs || null,
+          });
+          const postReq = http_module.request({
+            hostname: '127.0.0.1',
+            port: THINKDROP_MAIN_PORT,
+            path: '/voice/result',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+          }, () => {});
+          postReq.on('error', () => {});
+          postReq.write(payload);
+          postReq.end();
+          logger.info('[FastLane] Escalation result sent to renderer', { text: sgResult.text.substring(0, 60) });
+        } catch (err) {
+          logger.error('[FastLane] Escalation stategraph error', { error: err.message });
+        }
+      }).catch(() => {});
+
       return { text: answer, metadata: { source: 'fast_llm' } };
     } catch (error) {
       logger.error('[FastLane] LLM error', { error: error.message });
@@ -397,9 +495,20 @@ class VoiceServiceMCPServer {
 
   // ─── StateGraph Lane ──────────────────────────────────────────────────────────
 
-  async _stategraphLaneResponse(englishText, sessionId) {
+  async _stategraphLaneResponse(englishText, sessionId, responseLanguage = null) {
     try {
-      const result = await this._injectIntoStateGraph(englishText, sessionId);
+      // ── Guard: don't queue behind a running stategraph task ─────────────────
+      // If the journal shows stategraph is actively running (e.g. guide.step is
+      // waiting for user input, or waitForAuth is polling), injecting now will
+      // queue behind it and timeout after 120s. Return a busy message instead.
+      const sgState = journal.read().stategraph;
+      const sgLastUpdate = sgState?.lastUpdate ? new Date(sgState.lastUpdate).getTime() : 0;
+      const sgIsStale = (sgState?.status === 'running') && (Date.now() - sgLastUpdate > 300_000); // 5 min
+      if (sgState?.status === 'running' && !sgIsStale) {
+        logger.info('[StateGraphLane] Stategraph already running — returning busy response', { status: sgState.status });
+        return { text: "I'm still working on the previous task. Please wait or say cancel to stop it.", metadata: { source: 'busy' } };
+      }
+      const result = await this._injectIntoStateGraph(englishText, sessionId, responseLanguage);
       const fullAnswer = result.answer || result.text || '';
       const intent = result.intent || 'unknown';
 
@@ -502,10 +611,10 @@ class VoiceServiceMCPServer {
 
   // ─── StateGraph Injection ─────────────────────────────────────────────────────
 
-  async _injectIntoStateGraph(text, sessionId) {
+  async _injectIntoStateGraph(text, sessionId, responseLanguage = null) {
     return new Promise((resolve, reject) => {
       const http_module = require('http');
-      const body = JSON.stringify({ message: text, sessionId, source: 'voice' });
+      const body = JSON.stringify({ message: text, sessionId, source: 'voice', responseLanguage });
 
       const req = http_module.request({
         hostname: '127.0.0.1',
@@ -570,12 +679,13 @@ class VoiceServiceMCPServer {
   // ─── Health ───────────────────────────────────────────────────────────────────
 
   async healthCheck() {
-    const elevenlabsAvailable = await stt.isAvailable().catch(() => false);
+    const sttAvailable = await stt.isAvailable().catch(() => false);
     return {
       success: true,
       service: this.serviceName,
       status: 'healthy',
-      elevenlabs: elevenlabsAvailable,
+      stt: sttAvailable,
+      tts: !!(process.env.CARTESIA_API_KEY),
       journalPath: journal.JOURNAL_PATH,
       skills: ['voice.transcribe', 'voice.speak', 'voice.process', 'voice.signal', 'voice.status'],
     };
@@ -639,6 +749,9 @@ class VoiceServiceMCPServer {
               case '/voice.command':
                 result = await this.executeVoiceCommand(payload);
                 break;
+              case '/voice.provider':
+                result = await this.handleProviderSwitch(payload);
+                break;
               default:
                 res.writeHead(404);
                 res.end(JSON.stringify({ error: 'Not found', url: req.url }));
@@ -693,6 +806,98 @@ class VoiceServiceMCPServer {
   /**
    * General voice command endpoint — handles skill routing via payload.skill
    */
+  // ─── Provider switching ─────────────────────────────────────────────────────
+
+  async handleProviderSwitch(payload) {
+    const { action, provider } = payload || {};
+    if (action === 'list') {
+      return { success: true, providers: voiceProvider.listProviders(), active: voiceProvider.getProviderName() };
+    }
+    if (action === 'set' && provider) {
+      try {
+        const result = voiceProvider.setProvider(provider);
+        return { success: true, ...result };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+    return { success: true, active: voiceProvider.getProviderName(), providers: voiceProvider.listProviders() };
+  }
+
+  // ─── Hume EVI one-shot pipeline ───────────────────────────────────────────────
+
+  async _processWithHumeEVI({ audioBase64, sessionId }) {
+    journal.setVoiceStatus('processing');
+    logger.info('[Pipeline:EVI] Processing audio via Hume EVI');
+
+    try {
+      const result = await voiceProvider.eviProcessAudio({
+        audioBase64,
+        onStateGraphTrigger: async (text) => {
+          logger.info('[Pipeline:EVI] StateGraph trigger', { text: text.substring(0, 80) });
+          try {
+            const sgResult = await this._stategraphLaneResponse(text, sessionId);
+            if (!sgResult.text) return;
+            // Synthesize TTS for the stategraph result (EVI already spoke holding phrase)
+            // For EVI mode we use the standard TTS for the result notification,
+            // since EVI's session is already closed by then.
+            const ttsResult = await tts.synthesize({ text: sgResult.text, language: 'en' }).catch(() => null);
+            if (!ttsResult) return;
+            const http_module = require('http');
+            const payload = JSON.stringify({
+              text: sgResult.text,
+              fullAnswer: sgResult.fullAnswer || sgResult.text,
+              audioBase64: ttsResult.audioBuffer.toString('base64'),
+              audioFormat: ttsResult.format || 'mp3',
+              language: 'en',
+              lane: 'stategraph',
+              durationEstimateMs: ttsResult.durationEstimateMs || null,
+            });
+            const postReq = http_module.request({
+              hostname: '127.0.0.1', port: THINKDROP_MAIN_PORT,
+              path: '/voice/result', method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+            }, () => {});
+            postReq.on('error', () => {});
+            postReq.write(payload);
+            postReq.end();
+          } catch (err) {
+            logger.error('[Pipeline:EVI] StateGraph error', { error: err.message });
+          }
+        },
+      });
+
+      journal.setVoiceStatus(result.lane === 'stategraph' ? 'idle' : 'speaking');
+
+      if (!result.audioBase64) {
+        journal.setVoiceStatus('idle');
+        return { success: true, lane: result.lane || 'fast', transcript: result.transcript, skipped: false, provider: 'hume' };
+      }
+
+      journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
+      return {
+        success: true,
+        lane: result.lane || 'fast',
+        transcript: result.transcript || '',
+        detectedLanguage: 'en',
+        wasTranslated: false,
+        englishText: result.transcript || '',
+        responseEnglish: result.responseText || '',
+        fullAnswer: result.responseText || '',
+        responseFinal: result.responseText || '',
+        audioBase64: result.audioBase64,
+        audioFormat: result.audioFormat || 'mp3',
+        durationEstimateMs: result.durationEstimateMs || 0,
+        provider: 'hume',
+      };
+    } catch (err) {
+      logger.error('[Pipeline:EVI] Error — falling back to standard pipeline', { error: err.message });
+      journal.setVoiceStatus('idle');
+      // Graceful degradation: fall through to standard pipeline
+      return this.process({ audioBase64, sessionId, skipWakeWordCheck: true, pushToTalk: true });
+    }
+  }
+
   async executeVoiceCommand(payload) {
     const { skill, args = {} } = payload || {};
 

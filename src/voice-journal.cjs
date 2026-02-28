@@ -75,6 +75,7 @@ const DEFAULT_STATE = {
     lastSpokenAt: null,
     activationMode: 'wake-word',
     detectedLanguage: 'en',
+    sessionLanguage: 'en',
   },
 };
 
@@ -265,6 +266,23 @@ function setVoiceStatus(status, extra = {}) {
 }
 
 /**
+ * Persist the user's current session language (e.g. 'zh', 'es', 'en').
+ * This is the single source of truth for response language across all lanes.
+ * answer.js reads this directly from the journal file.
+ */
+function setSessionLanguage(lang) {
+  if (!lang || lang === (read().voice?.sessionLanguage)) return;
+  const state = read();
+  patch({
+    voice: {
+      ...state.voice,
+      sessionLanguage: lang,
+    },
+  });
+  logger.info('[Journal] sessionLanguage updated', { lang });
+}
+
+/**
  * Get a human-readable status summary (for voice responses to status queries).
  */
 function getStatusSummary() {
@@ -334,6 +352,7 @@ module.exports = {
   readPendingSignals,
   acknowledgeSignal,
   setVoiceStatus,
+  setSessionLanguage,
   getStatusSummary,
   watch,
   JOURNAL_PATH,
