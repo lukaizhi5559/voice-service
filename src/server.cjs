@@ -31,7 +31,8 @@ const voiceProvider = require('./voice-provider.cjs');
 const { toEnglish, fromEnglish, normalizeLanguage, LANGUAGE_NAMES } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
 const router = require('./voice-router.cjs');
-const { warmUp: classifierWarmUp, classifyLLMResponse } = require('./voice-classifier.cjs');
+const { warmUp: classifierWarmUp, classifyFreshTask: _classifyFreshTask } = require('./voice-classifier.cjs');
+const { detectEmotion } = require('./audio-emotion.cjs');
 const journal = require('./voice-journal.cjs');
 
 const PORT = parseInt(process.env.PORT || '3006', 10);
@@ -52,11 +53,78 @@ function _loadFastLanePrompt() {
 }
 const FAST_LANE_SYSTEM_PROMPT = _loadFastLanePrompt();
 
+/**
+ * Strip Resemble AI / ElevenLabs emotion and paralinguistic tags from text.
+ * Used when the active TTS provider is NOT Resemble (tags would be read aloud literally).
+ * Also used for display text — tags are TTS-only markup.
+ *
+ * Strips: [happy] [sad] [angry] [excited] [empathetic] [laugh] [sigh] [gasp] [crying]
+ * Also strips basic SSML: <break .../> <prosody ...>...</prosody> <emotion .../>
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function _stripEmotionTags(text) {
+  if (!text) return text;
+  return text
+    .replace(/\[(happy|sad|angry|excited|empathetic|laugh|laughter|sigh|gasp|crying|whispering|shouting)\]/gi, '')
+    .replace(/<break[^>]*\/>/gi, '')
+    .replace(/<prosody[^>]*>(.*?)<\/prosody>/gi, '$1')
+    .replace(/<emotion[^>]*\/>/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Return a fast canned holding phrase for the given language and trigger type.
+ * Used when pre-LLM intent detection fires — no LLM round-trip needed.
+ *
+ * @param {string} lang - BCP-47 language code (e.g. 'en', 'zh', 'es')
+ * @param {string} triggerType - 'action_lookup' | 'research' | 'computer_action'
+ * @returns {string}
+ */
+function _holdingPhrase(lang, triggerType) {
+  const phrases = {
+    zh: {
+      action_lookup: '让我查一下，马上回来。',
+      research:      '让我查一下，马上回来。',
+      computer_action: '好的，我来处理这个。',
+    },
+    es: {
+      action_lookup: 'Déjame buscar eso ahora mismo.',
+      research:      'Déjame investigar eso.',
+      computer_action: 'ThinkDrop se encargará de eso.',
+    },
+    fr: {
+      action_lookup: 'Je vérifie ça tout de suite.',
+      research:      'Je cherche ça maintenant.',
+      computer_action: 'ThinkDrop va s\'en occuper.',
+    },
+    ja: {
+      action_lookup: 'ただいま確認します。',
+      research:      'ただいま調べます。',
+      computer_action: 'ThinkDropが処理します。',
+    },
+    ko: {
+      action_lookup: '지금 바로 확인해 드리겠습니다.',
+      research:      '찾아보겠습니다.',
+      computer_action: 'ThinkDrop이 처리하겠습니다.',
+    },
+  };
+
+  const langPhrases = phrases[lang] || {
+    action_lookup:  'Let me check on that for you.',
+    research:       'Let me look that up.',
+    computer_action: 'Routing that to ThinkDrop now.',
+  };
+
+  return langPhrases[triggerType] || langPhrases.action_lookup;
+}
+
 class VoiceServiceMCPServer {
   constructor() {
     this.serviceName = SERVICE_NAME;
     journal.setVoiceStatus('idle');
-    classifierWarmUp();
     logger.info('VoiceServiceMCPServer initialized', { serviceName: this.serviceName });
   }
 
@@ -167,7 +235,7 @@ class VoiceServiceMCPServer {
       // Inject directly into the pipeline at step 2 with a synthetic sttResult
       const sttResult = { text: preTranscript, language: languageHint || 'en', confidence: 1.0, isFinal: true };
       try {
-        return await this._runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+        return await this._runPipeline({ sttResult, audioBase64: null, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
       } catch (err) {
         logger.error('[Pipeline] Error in skipSTT path', { error: err.message });
         journal.setVoiceStatus('idle');
@@ -206,7 +274,7 @@ class VoiceServiceMCPServer {
         return { success: true, skipped: true, reason: 'empty_transcript' };
       }
 
-      return await this._runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+      return await this._runPipeline({ sttResult, audioBase64, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
     } catch (err) {
       logger.error('[Pipeline] Error', { error: err.message });
       journal.setVoiceStatus('idle');
@@ -214,7 +282,7 @@ class VoiceServiceMCPServer {
     }
   }
 
-  async _runPipeline({ sttResult, pushToTalk, skipWakeWordCheck, sessionId, skipInject = false }) {
+  async _runPipeline({ sttResult, audioBase64 = null, pushToTalk, skipWakeWordCheck, sessionId, skipInject = false }) {
     try {
       // ── Noise filter ──
       // Strip parenthetical sound-effect labels first, keep actual spoken words
@@ -252,7 +320,8 @@ class VoiceServiceMCPServer {
       const detectedLanguage = normalizeLanguage(sttResult.language);
       journal.setVoiceStatus('processing', { detectedLanguage });
       // Persist session language as single source of truth — answer.js reads this directly
-      if (detectedLanguage && detectedLanguage !== 'en') {
+      // Always update (including clearing back to 'en') so it doesn't stick across language switches.
+      if (detectedLanguage) {
         journal.setSessionLanguage(detectedLanguage);
       }
 
@@ -284,8 +353,17 @@ class VoiceServiceMCPServer {
       const { englishText, wasTranslated } = await toEnglish(sttResult);
       logger.info('[Pipeline] Translation', { wasTranslated, englishText: englishText.substring(0, 80) });
 
-      // ── Step 4: Route ──
-      const routeResult = await router.route(englishText);
+      // ── Step 4: Detect audio emotion ────────────────────────────────────────
+      // Analyzes audio energy/variance to infer emotional state (yelling, excited,
+      // sad, neutral). This is passed to the LLM so it can inject Resemble AI
+      // emotion tags into its response for expressive TTS.
+      const emotionResult = detectEmotion(audioBase64 || '', { transcript: englishText }); // audioBase64 may be null for skipSTT path — emotion falls back to text cues only
+      if (emotionResult.emotion !== 'neutral') {
+        logger.info('[Pipeline] Emotion detected', { emotion: emotionResult.emotion, intensity: emotionResult.intensity });
+      }
+
+      // ── Step 5: Route (always fast lane) ─────────────────────────────────────
+      const routeResult = router.route(englishText);
 
       // Write signal to journal if needed (cancel/pause/resume)
       if (routeResult.signalType) {
@@ -293,7 +371,7 @@ class VoiceServiceMCPServer {
         logger.info('[Pipeline] Signal written', { signalType: routeResult.signalType, signalId });
       }
 
-      // ── Step 5: Generate response ──
+      // ── Step 6: Generate response (always fast lane) ──────────────────────────
       let responseEnglish;
       let responseMetadata = {};
 
@@ -303,7 +381,7 @@ class VoiceServiceMCPServer {
         journal.setVoiceStatus('idle');
         return {
           success: true,
-          lane: routeResult.lane,
+          lane: 'fast',
           transcript: sttResult.text,
           detectedLanguage,
           wasTranslated,
@@ -313,25 +391,23 @@ class VoiceServiceMCPServer {
       }
 
       let fullAnswerEnglish = '';
-      if (routeResult.lane === 'fast') {
-        const fastResult = await this._fastLaneResponse(englishText, routeResult, detectedLanguage);
-        responseEnglish = fastResult.text;
-        fullAnswerEnglish = fastResult.text;
-        responseMetadata = fastResult.metadata || {};
-      } else {
-        const sgResult = await this._stategraphLaneResponse(englishText, sessionId, detectedLanguage);
-        responseEnglish = sgResult.text;        // spoken summary (short)
-        fullAnswerEnglish = sgResult.fullAnswer || sgResult.text; // full answer for Results window
-        responseMetadata = { ...sgResult.metadata || {}, hadLiveStream: !!sgResult.hadLiveStream };
-      }
+      // Voice-first: always fast lane. SG escalation driven by LLM trigger phrase detection.
+      // _fastLaneResponse also pre-starts TTS translation (ttsPromise) in parallel so we
+      // can await it concurrently with display translation below — hiding ~300-500ms latency.
+      const fastResult = await this._fastLaneResponse(englishText, routeResult, detectedLanguage, emotionResult);
+      responseEnglish = fastResult.text;
+      fullAnswerEnglish = fastResult.text;
+      responseMetadata = fastResult.metadata || {};
 
       if (!responseEnglish) {
         journal.setVoiceStatus('idle');
-        return { success: true, lane: routeResult.lane, transcript: sttResult.text, englishText, response: null };
+        return { success: true, lane: 'fast', transcript: sttResult.text, englishText, response: null };
       }
 
-      // ── Step 6: TTS — both lanes synthesize audio ────────────────────────────
-      // Hard cap at 50 words before translation to keep TTS audio short (< 10s)
+      // ── Step 7: TTS ────────────────────────────────────────────────────────
+      // Hard cap at 50 words before translation to keep TTS audio short (< 10s).
+      // Emotion tags ([happy], [excited], etc.) are preserved for Resemble AI
+      // and stripped for all other providers (Cartesia, Inworld, macOS).
       const MAX_SPOKEN_WORDS = 50;
       const spokenWords = responseEnglish.trim().split(/\s+/);
       const cappedEnglish = spokenWords.length > MAX_SPOKEN_WORDS
@@ -340,41 +416,61 @@ class VoiceServiceMCPServer {
       if (spokenWords.length > MAX_SPOKEN_WORDS) {
         logger.info('[Pipeline] TTS text capped', { original: spokenWords.length, capped: MAX_SPOKEN_WORDS });
       }
-      const responseInUserLanguage = await fromEnglish(cappedEnglish, detectedLanguage);
+
+      // Strip emotion tags for non-Resemble providers (they'd be read aloud literally)
+      const isResembleActive = voiceProvider.getProviderName() === 'resemble';
+      const ttsEnglish = isResembleActive
+        ? cappedEnglish
+        : _stripEmotionTags(cappedEnglish);
+
+      // Use pre-started ttsPromise from _fastLaneResponse if available (English already handled).
+      // For non-English: ttsPromise was kicked off in parallel with this code — just await it.
+      // For English: fastResult.ttsPromise resolves immediately with the original text.
+      const responseInUserLanguage = fastResult.ttsPromise
+        ? await fastResult.ttsPromise
+        : await fromEnglish(ttsEnglish, detectedLanguage);
 
       // Translate fullAnswer + responseEnglish for ResultsWindow display when non-English.
-      // Use sessionLanguage from journal as fallback when wasTranslated is false
-      // (e.g. Groq returned language='zh' directly so no translation was needed, but
-      // the fast lane LLM reply was generated in English and must be translated back).
+      // Use sessionLanguage from journal as fallback when wasTranslated is false.
+      // Always strip emotion tags from display text (they're TTS-only markup).
       const displayLang = (detectedLanguage && detectedLanguage !== 'en')
         ? detectedLanguage
         : (journal.read().voice?.sessionLanguage || 'en');
       const needsDisplayTranslation = displayLang !== 'en';
 
-      let fullAnswerDisplay = fullAnswerEnglish;
-      let responseDisplay = responseEnglish;
+      const responseEnglishClean = _stripEmotionTags(responseEnglish);
+      const fullAnswerEnglishClean = _stripEmotionTags(fullAnswerEnglish);
+
+      let fullAnswerDisplay = fullAnswerEnglishClean;
+      let responseDisplay = responseEnglishClean;
       if (needsDisplayTranslation) {
         try {
-          // Translate both independently — fast lane has responseEnglish === fullAnswerEnglish,
-          // stategraph lane may have different strings. Always translate responseDisplay.
-          const translateFull = fullAnswerEnglish
-            ? fromEnglish(fullAnswerEnglish, displayLang).catch(() => fullAnswerEnglish)
-            : Promise.resolve(fullAnswerEnglish);
-          const translateResp = responseEnglish
-            ? fromEnglish(responseEnglish, displayLang).catch(() => responseEnglish)
-            : Promise.resolve(responseEnglish);
+          const translateFull = fullAnswerEnglishClean
+            ? fromEnglish(fullAnswerEnglishClean, displayLang).catch(() => fullAnswerEnglishClean)
+            : Promise.resolve(fullAnswerEnglishClean);
+          const translateResp = responseEnglishClean
+            ? fromEnglish(responseEnglishClean, displayLang).catch(() => responseEnglishClean)
+            : Promise.resolve(responseEnglishClean);
           [fullAnswerDisplay, responseDisplay] = await Promise.all([translateFull, translateResp]);
-          logger.info('[Pipeline] Display text translated', { displayLang, lane: routeResult.lane });
+          logger.info('[Pipeline] Display text translated', { displayLang });
         } catch (_) {}
       }
 
+      // Build TTS options — pass exaggeration for Resemble (maps emotion intensity to vocal expressiveness)
+      const isResembleForTTS = voiceProvider.getProviderName() === 'resemble';
+      const ttsOpts = { text: responseInUserLanguage, language: detectedLanguage };
+      if (isResembleForTTS && emotionResult && emotionResult.intensity) {
+        const { _intensityToExaggeration } = require('./providers/resemble.cjs');
+        ttsOpts.exaggeration = _intensityToExaggeration(emotionResult.intensity);
+      }
+
       journal.setVoiceStatus('speaking');
-      const ttsResult = await voiceProvider.synthesize({ text: responseInUserLanguage, language: detectedLanguage });
+      const ttsResult = await voiceProvider.synthesize(ttsOpts);
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
 
       return {
         success: true,
-        lane: routeResult.lane,
+        lane: 'fast',
         transcript: sttResult.text,
         detectedLanguage,
         wasTranslated,
@@ -386,6 +482,7 @@ class VoiceServiceMCPServer {
         audioBase64: ttsResult.audioBuffer.toString('base64'),
         audioFormat: ttsResult.format,
         durationEstimateMs: ttsResult.durationEstimateMs,
+        triggered: !!(responseMetadata.triggered),  // true when stategraph escalation fired in background
         metadata: responseMetadata,
       };
     } catch (error) {
@@ -395,10 +492,16 @@ class VoiceServiceMCPServer {
     }
   }
 
-  // ─── Fast Lane ────────────────────────────────────────────────────────────────
+  // ─── Fast Lane (voice-first — ALL utterances go here) ────────────────────────
 
-  async _fastLaneResponse(englishText, routeResult, responseLanguage = null) {
-    // Status queries — answer from journal without hitting LLM
+  /**
+   * @param {string} englishText
+   * @param {{ reason: string, signalType: string|null }} routeResult
+   * @param {string|null} responseLanguage
+   * @param {{ emotion: string, intensity: string, tags: string[], context: string }} emotionResult
+   */
+  async _fastLaneResponse(englishText, routeResult, responseLanguage = null, emotionResult = null) {
+    // ── Control signal short-circuits (no LLM needed) ─────────────────────────
     if (routeResult.reason === 'cancel_signal') {
       const sgState = journal.read().stategraph;
       if (sgState.status === 'running') {
@@ -415,87 +518,119 @@ class VoiceServiceMCPServer {
       return { text: 'Back in motion. Resuming where we left off.', metadata: { source: 'journal' } };
     }
 
-    if (routeResult.reason === 'fast_intent' || routeResult.reason === 'sg_running_question') {
-      const statusSummary = journal.getStatusSummary();
-      const isStatusQuery = /\b(status|how|progress|what|where|are you|still)\b/i.test(englishText);
+    // ── Build system prompt ────────────────────────────────────────────────────
+    const _fastLang = journal.read().voice?.sessionLanguage || responseLanguage || 'en';
+    const isResembleActive = voiceProvider.getProviderName() === 'resemble';
+    let _fastSystemPrompt = FAST_LANE_SYSTEM_PROMPT;
 
-      if (isStatusQuery) {
-        return { text: statusSummary, metadata: { source: 'journal' } };
-      }
+    // Only inject emotion tag instructions when Resemble is active — other
+    // providers (Cartesia, Inworld, macOS) read the brackets literally.
+    if (isResembleActive && emotionResult && emotionResult.emotion !== 'neutral' && emotionResult.context) {
+      _fastSystemPrompt += `\n\n═══ USER EMOTIONAL STATE ═══\nDetected: ${emotionResult.emotion.toUpperCase()} (intensity: ${emotionResult.intensity})\n${emotionResult.context}\nSuggested tag: ${emotionResult.tags.join(', ') || 'none'}\n═══════════════════════════`;
+    } else if (!isResembleActive) {
+      _fastSystemPrompt += `\n\nDo NOT use any emotion tags like [happy] or [excited] in your response. Plain text only.`;
     }
 
-    // For other fast-lane queries, hit the LLM directly (no StateGraph)
-    // Inject sessionLanguage from journal so the LLM replies in the user's language directly.
-    const _fastLang = journal.read().voice?.sessionLanguage || responseLanguage || 'en';
-    const _fastSystemPrompt = (_fastLang && _fastLang !== 'en')
-      ? `${FAST_LANE_SYSTEM_PROMPT}\n\nIMPORTANT: The user is speaking ${LANGUAGE_NAMES[_fastLang] || _fastLang}. You MUST respond entirely in ${LANGUAGE_NAMES[_fastLang] || _fastLang}. Do not use English.`
-      : FAST_LANE_SYSTEM_PROMPT;
+    if (_fastLang && _fastLang !== 'en') {
+      _fastSystemPrompt += `\n\nIMPORTANT: The user is speaking ${LANGUAGE_NAMES[_fastLang] || _fastLang}. You MUST respond entirely in ${LANGUAGE_NAMES[_fastLang] || _fastLang}. Do not use English.`;
+    }
+
+    // ── LLM call (early-resolve) + combined trigger classification ────────────
+    // _directLLMQueryEarly resolves as soon as the first sentence is complete,
+    // so TTS can start on that sentence immediately. The fullText is used for
+    // trigger classification once the LLM finishes streaming in the background.
+    const { classifySGTrigger } = require('./voice-router.cjs');
+
     try {
-      const answer = await this._directLLMQuery(englishText, _fastSystemPrompt);
-      if (!answer || !answer.trim()) {
+      const { firstSentence, fullText } = await this._directLLMQueryEarly(englishText, _fastSystemPrompt);
+      const spokenAnswer = firstSentence || fullText;
+      if (!spokenAnswer || !spokenAnswer.trim()) {
         return { text: "Consider it noted, though I've nothing to add at the moment.", metadata: { source: 'fast_llm_empty' } };
       }
 
-      // ── Action escalation: classify LLM response ──────────────────────────
-      // If the LLM replied with action-confirmation language ("I'll do that",
-      // "Consider it done", "Closing now", etc.) the fast lane has no ability
-      // to actually execute — escalate the original user prompt to stategraph
-      // in the background so the real action runs while TTS plays.
-      // The stategraph result (including its own TTS) is sent to the renderer
-      // via the /voice/result overlay endpoint after execution completes.
-      classifyLLMResponse(answer).then(async ({ isActionConfirmation }) => {
-        if (!isActionConfirmation) return;
-        logger.info('[FastLane] Action escalation — routing original prompt to stategraph', {
-          prompt: englishText.substring(0, 80),
-          response: answer.substring(0, 80),
-        });
-        try {
-          const escalationLang = journal.read().voice?.sessionLanguage || 'en';
-          const sgResult = await this._stategraphLaneResponse(englishText, null, escalationLang !== 'en' ? escalationLang : null);
-          if (!sgResult.text) return;
-          // Translate spoken summary back to user's language before TTS
-          const ttsLang = (escalationLang && escalationLang !== 'en') ? escalationLang : 'en';
-          const spokenText = (ttsLang !== 'en') ? await fromEnglish(sgResult.text, ttsLang).catch(() => sgResult.text) : sgResult.text;
-          // Synthesize TTS for the stategraph spoken summary
-          const ttsResult = await voiceProvider.synthesize({ text: spokenText, language: ttsLang }).catch(() => null);
-          if (!ttsResult) return;
-          // POST result back to main process so it forwards voice:response to renderer
-          const http_module = require('http');
-          const payload = JSON.stringify({
-            text: sgResult.text,
-            fullAnswer: sgResult.fullAnswer || sgResult.text,
-            audioBase64: ttsResult.audioBuffer.toString('base64'),
-            audioFormat: ttsResult.format || 'mp3',
-            language: ttsLang,
-            lane: 'stategraph',
-            durationEstimateMs: ttsResult.durationEstimateMs || null,
-          });
-          const postReq = http_module.request({
-            hostname: '127.0.0.1',
-            port: THINKDROP_MAIN_PORT,
-            path: '/voice/result',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-          }, () => {});
-          postReq.on('error', () => {});
-          postReq.write(payload);
-          postReq.end();
-          logger.info('[FastLane] Escalation result sent to renderer', { text: sgResult.text.substring(0, 60) });
-        } catch (err) {
-          logger.error('[FastLane] Escalation stategraph error', { error: err.message });
-        }
-      }).catch(() => {});
+      // ── Combined trigger classification (user intent + full LLM response) ───
+      const { shouldTrigger, triggerType } = classifySGTrigger(englishText, fullText);
 
-      return { text: answer, metadata: { source: 'fast_llm' } };
+      if (shouldTrigger) {
+        logger.info('[FastLane] SG trigger classified — escalating in background', {
+          prompt: englishText.substring(0, 80),
+          triggerType,
+          response: fullText.substring(0, 80),
+        });
+        this._escalateToStateGraph(englishText, triggerType).catch(err => {
+          logger.error('[FastLane] SG escalation error', { error: err.message });
+        });
+      }
+
+      // ── Pre-start TTS translation in parallel ────────────────────────────────
+      // Kick off fromEnglish() NOW so the caller can await it concurrently with
+      // display translation rather than sequentially after this function returns.
+      // This hides ~300-500ms of translation latency on non-English responses.
+      const ttsPromise = responseLanguage && responseLanguage !== 'en'
+        ? fromEnglish(spokenAnswer, responseLanguage).catch(() => spokenAnswer)
+        : Promise.resolve(spokenAnswer);
+
+      return { text: spokenAnswer, ttsPromise, metadata: { source: 'fast_llm', triggered: shouldTrigger, triggerType, fullText } };
     } catch (error) {
       logger.error('[FastLane] LLM error', { error: error.message });
       return { text: "My apologies — the circuits are occupied. Try again in a moment.", metadata: { source: 'error' } };
     }
   }
 
+  /**
+   * Background StateGraph escalation — fires after fast lane returns its holding phrase.
+   * Result is POSTed to /voice/result on the main process overlay port so the
+   * renderer receives it as a second voice:response after the TTS completes.
+   *
+   * @param {string} englishText - Original user prompt
+   * @param {string} triggerType - 'action_lookup' | 'research' | 'computer_action'
+   */
+  async _escalateToStateGraph(englishText, triggerType) {
+    const escalationLang = journal.read().voice?.sessionLanguage || 'en';
+    const sgResult = await this._stategraphLaneResponse(englishText, null, escalationLang !== 'en' ? escalationLang : null, true);
+    if (!sgResult.text) return;
+
+    // Translate spoken summary back to user's language before TTS
+    const ttsLang = (escalationLang && escalationLang !== 'en') ? escalationLang : 'en';
+    const spokenText = (ttsLang !== 'en')
+      ? await fromEnglish(sgResult.text, ttsLang).catch(() => sgResult.text)
+      : sgResult.text;
+
+    // Synthesize TTS for the stategraph result
+    const ttsResult = await voiceProvider.synthesize({ text: spokenText, language: ttsLang }).catch(() => null);
+    if (!ttsResult) return;
+
+    // POST result back to main process → forwards voice:response to renderer
+    const http_module = require('http');
+    const payload = JSON.stringify({
+      text: sgResult.text,
+      fullAnswer: sgResult.fullAnswer || sgResult.text,
+      audioBase64: ttsResult.audioBuffer.toString('base64'),
+      audioFormat: ttsResult.format || 'mp3',
+      language: ttsLang,
+      lane: 'stategraph',
+      triggerType,
+      durationEstimateMs: ttsResult.durationEstimateMs || null,
+    });
+    const postReq = http_module.request({
+      hostname: '127.0.0.1',
+      port: THINKDROP_MAIN_PORT,
+      path: '/voice/result',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    }, () => {});
+    postReq.on('error', () => {});
+    postReq.write(payload);
+    postReq.end();
+    logger.info('[FastLane] SG escalation result sent to renderer', {
+      text: sgResult.text.substring(0, 60),
+      triggerType,
+    });
+  }
+
   // ─── StateGraph Lane ──────────────────────────────────────────────────────────
 
-  async _stategraphLaneResponse(englishText, sessionId, responseLanguage = null) {
+  async _stategraphLaneResponse(englishText, sessionId, responseLanguage = null, voiceOnly = false) {
     try {
       // ── Guard: don't queue behind a running stategraph task ─────────────────
       // If the journal shows stategraph is actively running (e.g. guide.step is
@@ -508,42 +643,67 @@ class VoiceServiceMCPServer {
         logger.info('[StateGraphLane] Stategraph already running — returning busy response', { status: sgState.status });
         return { text: "I'm still working on the previous task. Please wait or say cancel to stop it.", metadata: { source: 'busy' } };
       }
-      const result = await this._injectIntoStateGraph(englishText, sessionId, responseLanguage);
+      const result = await this._injectIntoStateGraph(englishText, sessionId, responseLanguage, voiceOnly);
       const fullAnswer = result.answer || result.text || '';
       const intent = result.intent || 'unknown';
+      const skillResults = result.skillResults || [];
 
-      // For command_automate lanes: answer is empty (streamed to Results window during execution).
-      // Generate a short spoken confirmation instead.
-      if (!fullAnswer || fullAnswer.trim().length === 0) {
-        const confirmation = intent === 'command_automate'
-          ? 'Done.'
-          : "Got it.";
+      // ── Extract the best spoken answer from skill results ────────────────────
+      // Priority: (1) short stdout from a successful step (e.g. `date` output = "08:54:18"),
+      // (2) fullAnswer if it looks like real content, (3) generic confirmation.
+      // This prevents the LLM summarizer from being called with useless strings like
+      // "All 1 step completed successfully." and hallucinating "I can't determine the time."
+      const usableStdout = skillResults
+        .filter(r => r.ok && r.stdout && typeof r.stdout === 'string' && r.stdout.trim().length > 0)
+        .map(r => r.stdout.trim())
+        .join(' ');
+
+      // Detect generic/useless answer strings from executeCommand that shouldn't be spoken verbatim.
+      // These are internal status messages, not meaningful answers for voice.
+      const isGenericAnswer = !fullAnswer || /^(all \d+ steps? completed|completed \d+\/\d+|done\.?$|got it\.?$)/i.test(fullAnswer.trim())
+        || /^All \d+ steps? completed successfully/i.test(fullAnswer.trim());
+
+      // If the only content is a generic completion message, use actual step stdout instead
+      let contentForVoice = fullAnswer;
+      let usedRawStdout = false;
+      if (isGenericAnswer && usableStdout) {
+        contentForVoice = usableStdout;
+        usedRawStdout = true;
+        logger.info('[StateGraphLane] Using skill stdout as spoken answer instead of generic completion message', { stdout: usableStdout.substring(0, 80) });
+      }
+
+      // If still nothing useful, return a short confirmation
+      if (!contentForVoice || contentForVoice.trim().length === 0) {
+        const confirmation = intent === 'command_automate' ? 'Done.' : 'Got it.';
         logger.info('[StateGraphLane] Command lane — using confirmation', { intent, confirmation });
         return { text: confirmation, fullAnswer: '', hadLiveStream: !!result.hadLiveStream, metadata: { source: 'stategraph', intent } };
       }
 
       // Generate a short spoken summary (≤20 words) — full answer already streamed to Results window.
+      // Also naturalise raw stdout (e.g. "Sun Mar 8 09:06:32 EDT 2026" → "It's 9:06 AM.") so it
+      // sounds like a human response rather than a terminal printout.
       const SUMMARY_WORD_LIMIT = 20;
-      let spokenSummary = fullAnswer;
-      if (fullAnswer.split(/\s+/).length > SUMMARY_WORD_LIMIT) {
+      let spokenSummary = contentForVoice;
+      const needsNaturalisation = usedRawStdout || contentForVoice.split(/\s+/).length > SUMMARY_WORD_LIMIT;
+      if (needsNaturalisation) {
         try {
           const raw = await this._directLLMQuery(
-            `Reply in ONE sentence of at most 15 words for a voice assistant. No markdown. Just the sentence.\n\nContext: ${fullAnswer.substring(0, 800)}`
+            `You are a voice assistant. Convert the following raw data into ONE natural spoken sentence (≤15 words). Sound like a human, not a terminal. No markdown.\n\nUser asked: "${englishText}"\nRaw data: ${contentForVoice.substring(0, 400)}`
           );
           // Hard-cap regardless of what LLM returns
           const words = raw.trim().split(/\s+/);
           spokenSummary = words.length > SUMMARY_WORD_LIMIT
             ? words.slice(0, SUMMARY_WORD_LIMIT).join(' ') + '.'
             : raw.trim();
-          logger.info('[StateGraphLane] Generated spoken summary', { fullWords: fullAnswer.split(/\s+/).length, summaryWords: spokenSummary.split(/\s+/).length });
+          logger.info('[StateGraphLane] Generated spoken summary', { fullWords: contentForVoice.split(/\s+/).length, summaryWords: spokenSummary.split(/\s+/).length, naturalised: usedRawStdout });
         } catch (_) {
-          spokenSummary = fullAnswer.split(/\s+/).slice(0, SUMMARY_WORD_LIMIT).join(' ') + '.';
+          spokenSummary = contentForVoice.split(/\s+/).slice(0, SUMMARY_WORD_LIMIT).join(' ') + '.';
         }
       }
 
       return {
         text: spokenSummary,
-        fullAnswer,
+        fullAnswer: fullAnswer || contentForVoice,
         hadLiveStream: !!result.hadLiveStream,
         metadata: { source: 'stategraph', intent },
       };
@@ -576,10 +736,11 @@ class VoiceServiceMCPServer {
             prompt: text,
             provider: 'openai',
             options: {
-              maxTokens: 150,
+              maxTokens: 80,
               temperature: 0.7,
               taskType: 'conversation',
               responseLength: 'short',
+              model: 'gpt-4o-mini',
               stream: true,
             },
             context: {
@@ -609,12 +770,113 @@ class VoiceServiceMCPServer {
     });
   }
 
+  /**
+   * LLM query that resolves early at the first sentence boundary.
+   * Returns { firstSentence, fullText } — firstSentence is available as soon
+   * as the LLM streams a '.', '?', or '!' so TTS can start immediately.
+   * fullText is the complete response (needed for trigger classification).
+   *
+   * @param {string} text
+   * @param {string|null} systemPrompt
+   * @returns {Promise<{ firstSentence: string, fullText: string }>}
+   */
+  _directLLMQueryEarly(text, systemPrompt = null) {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(STATEGRAPH_WS_URL, {
+        headers: STATEGRAPH_API_KEY ? { Authorization: `Bearer ${STATEGRAPH_API_KEY}` } : {},
+      });
+
+      const requestId = `voice_fast_early_${Date.now()}`;
+      let fullText = '';
+      let firstSentence = '';
+      let earlyResolved = false;
+      let settled = false;
+
+      const SENTENCE_END = /[.?!]/;
+
+      const checkEarlyResolve = () => {
+        if (earlyResolved) return;
+        const match = fullText.match(/^[^.?!]*[.?!]/);
+        if (match && match[0].trim().length > 4) {
+          firstSentence = match[0].trim();
+          earlyResolved = true;
+        }
+      };
+
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          ws.close();
+          const fs = firstSentence || fullText || 'Forgive the delay — no answer came in time.';
+          resolve({ firstSentence: fs, fullText: fullText || fs });
+        }
+      }, 15000);
+
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          id: requestId,
+          type: 'llm_request',
+          payload: {
+            prompt: text,
+            provider: 'openai',
+            options: {
+              maxTokens: 80,
+              temperature: 0.7,
+              taskType: 'conversation',
+              responseLength: 'short',
+              model: 'gpt-4o-mini',
+              stream: true,
+            },
+            context: { systemInstructions: systemPrompt || '' },
+          },
+          timestamp: Date.now(),
+          metadata: { source: 'voice_fast_lane' },
+        }));
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === 'llm_stream_chunk' && msg.payload?.text) {
+            fullText += msg.payload.text;
+            checkEarlyResolve();
+          } else if (msg.type === 'llm_stream_end') {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timeout);
+              ws.close();
+              const fs = firstSentence || fullText.trim();
+              resolve({ firstSentence: fs, fullText: fullText.trim() });
+            }
+          } else if (msg.type === 'error') {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timeout);
+              ws.close();
+              reject(new Error(msg.payload?.message || 'LLM error'));
+            }
+          }
+        } catch (_) {}
+      });
+
+      ws.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timeout); reject(err); } });
+      ws.on('close', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          const fs = firstSentence || fullText || '';
+          resolve({ firstSentence: fs, fullText: fullText || fs });
+        }
+      });
+    });
+  }
+
   // ─── StateGraph Injection ─────────────────────────────────────────────────────
 
-  async _injectIntoStateGraph(text, sessionId, responseLanguage = null) {
+  async _injectIntoStateGraph(text, sessionId, responseLanguage = null, voiceOnly = false) {
     return new Promise((resolve, reject) => {
       const http_module = require('http');
-      const body = JSON.stringify({ message: text, sessionId, source: 'voice', responseLanguage });
+      const body = JSON.stringify({ message: text, sessionId, source: 'voice', responseLanguage, voiceOnly });
 
       const req = http_module.request({
         hostname: '127.0.0.1',
@@ -751,6 +1013,9 @@ class VoiceServiceMCPServer {
                 break;
               case '/voice.provider':
                 result = await this.handleProviderSwitch(payload);
+                break;
+              case '/voice.classify':
+                result = await this.classifyFreshTask(payload);
                 break;
               default:
                 res.writeHead(404);
@@ -896,6 +1161,15 @@ class VoiceServiceMCPServer {
       // Graceful degradation: fall through to standard pipeline
       return this.process({ audioBase64, sessionId, skipWakeWordCheck: true, pushToTalk: true });
     }
+  }
+
+  /**
+   * Classify whether a new user prompt is a fresh task vs a reply to a paused question.
+   * Delegates to voice-classifier.cjs classifyFreshTask (embedding cosine similarity).
+   * payload: { prompt: string, pausedQuestion?: string }
+   */
+  async classifyFreshTask({ prompt, pausedQuestion } = {}) {
+    return _classifyFreshTask(prompt, pausedQuestion || null);
   }
 
   async executeVoiceCommand(payload) {

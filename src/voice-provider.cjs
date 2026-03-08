@@ -35,14 +35,16 @@ const inworld       = require('./providers/inworld.cjs');
 const cartesia      = require('./providers/cartesia.cjs');
 const groqProvider  = require('./providers/groq.cjs');
 const macosNative   = require('./providers/macos-native.cjs');
+const resemble      = require('./providers/resemble.cjs');
 
 // ── Fallback chain ────────────────────────────────────────────────────────────
-const FALLBACK_CHAIN = ['cartesia', 'inworld', 'groq', 'macos', 'hume'];
+const FALLBACK_CHAIN = ['resemble', 'cartesia', 'inworld', 'groq', 'macos', 'hume'];
 
 const PROVIDER_MAP = {
   hume:       humeEvi,
   inworld:    inworld,
   cartesia:   cartesia,
+  resemble:   resemble,
   groq:       groqProvider,
   macos:      macosNative,
 };

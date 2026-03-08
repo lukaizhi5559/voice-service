@@ -1,41 +1,32 @@
 /**
- * Voice Router — Fast Lane vs StateGraph Lane
+ * Voice Router — Voice-First, Single Fast Lane
  *
- * Every incoming voice utterance (already translated to English) is classified:
+ * ALL utterances go through the fast lane (direct LLM response with personality).
+ * The LLM response is then analyzed: if it contains a StateGraph trigger phrase
+ * (meaning the AI said "let me look into that", "checking now", etc.), the original
+ * user prompt is forwarded to StateGraph in the background while the LLM's spoken
+ * response plays. The SG result is spoken when ready.
  *
- *   FAST LANE — direct WebSocket LLM hit, no MCPs
- *     - Cancel/pause/resume control signals (hard regex — unambiguous)
- *     - Chitchat, greetings, identity questions, status queries
- *       → classified by Xenova embedding model (voice-classifier.cjs)
+ * Control signals (cancel/pause/resume) are still detected for journal writes,
+ * but all go through fast lane for the spoken response.
  *
- *   STATEGRAPH LANE — full pipeline, same as text input
- *     - Web search, memory, screen intelligence, command automation
- *     - General knowledge questions (StateGraph adds web + memory context)
- *     - Default when classifier is uncertain
- *
- * Decision flow:
- *   1. Hard control signals (cancel/pause/resume) — 3 regexes, no model needed
- *   2. Hard stategraph overrides (action commands) — bypass sg-running check
- *   3. Journal state check (SG running → fast lane for chitchat/filler only)
- *   4. Xenova embedding classifier → fast vs stategraph
- *
- * Output: { lane: 'fast' | 'stategraph', reason: string, signalType: string|null }
+ * Output: { lane: 'fast', reason: string, signalType: string|null }
  */
 
 'use strict';
 
 const logger = require('./logger.cjs');
 const journal = require('./voice-journal.cjs');
-const classifier = require('./voice-classifier.cjs');
 
 /**
- * Classify the utterance and return routing decision.
- * This function is now async because the classifier uses an embedding model.
+ * Detect control signals and return routing info.
+ * Always returns lane: 'fast' — StateGraph triggering is driven by the
+ * LLM response content, not by upfront routing.
  *
  * @param {string} englishText - Translated English transcript
- * @returns {Promise<{ lane: 'fast'|'stategraph', reason: string, signalType: string|null }>}
+ * @returns {{ lane: 'fast', reason: string, signalType: string|null }}
  */
-async function route(englishText) {
+function route(englishText) {
   const text = englishText.trim();
   const state = journal.read();
   const sgStatus = state.stategraph?.status;
@@ -46,7 +37,7 @@ async function route(englishText) {
   const effectiveStatus = isStale ? 'idle' : sgStatus;
   const isRunning = effectiveStatus === 'running' || effectiveStatus === 'paused';
 
-  // ── 1. Hard control signals — always fast lane, unambiguous ───────────────
+  // ── Control signals — detect for journal writes, still fast lane ──────────
   if (/\b(cancel (that|this|task|it)|abort (that|task|everything)|stop (that|everything|the task)|nevermind|never mind|forget it)\b/i.test(text)) {
     logger.info('[Router] → FAST LANE (cancel signal)', { text: text.substring(0, 60) });
     return { lane: 'fast', reason: 'cancel_signal', signalType: 'cancel' };
@@ -62,64 +53,129 @@ async function route(englishText) {
     return { lane: 'fast', reason: 'resume_signal', signalType: 'resume' };
   }
 
-  // ── 2. Hard stategraph overrides — evaluated BEFORE sg-running check ─────────
-  // These are unambiguous imperative commands that must always execute regardless
-  // of whether a stategraph task is currently running. Placing them here means
-  // "close Zoom" while another task runs still reaches stategraph instead of being
-  // swallowed by the fast lane with a fake "consider it done" response.
-
-  // Personal attribute lookup — "what's my name/email/age/etc."
-  if (/\bwhat('?s| is) my (name|age|birthday|email|address|phone|job|company)\b/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (personal-memory override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'personal_memory_override', signalType: null };
-  }
-
-  // Explicit skill listing — "list skills", "show me your skills", etc.
-  if (/\b(list|show me)\b.{0,20}\b(skills?|capabilities|commands|tools)\b/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (skill-list override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'skill_list_override', signalType: null };
-  }
-
-  // Data-fetch — "get/fetch/check the weather/news/etc." with an explicit data noun
-  if (/\b(get|fetch|find|look up|check|retrieve|search for)\b.{0,40}\b(weather|temperature|forecast|news|stock|price|score|results)\b/i.test(text) ||
-      /\bwhat('?s| is) the (weather|temperature|forecast|news)\b/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (data-fetch override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'data_fetch_override', signalType: null };
-  }
-
-  // Computer action override — "open X", "close X", "type X", "click X", "scroll X", etc.
-  // Expanded to cover more action verbs that are unambiguously command_automate.
-  // These must bypass the sg-running intercept — the user is issuing a new command.
-  if (/\b(open|launch|start|close|quit|exit|switch to|go to|navigate to|pull up|bring up|type|click|press|scroll|drag|resize|minimize|maximize|focus|hide|show|install|uninstall|download|upload|copy|paste|move|rename|delete|create|make|run|execute)\s+\S/i.test(text) &&
-      !/\b(how (do|can|would)|what is|tell me|explain|why)\b/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (computer-action override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'computer_action_override', signalType: null };
-  }
-
-  // Action phrase override — "I need you to X", "can you X for me", "please X"
-  // Catches "I need you to close the application Zoom" even when verb isn't first word.
-  if (/\b(i need you to|can you|please|could you|i want you to|go and|go ahead and)\s+\w/i.test(text)) {
-    logger.info('[Router] → STATEGRAPH LANE (action-phrase override)', { text: text.substring(0, 60) });
-    return { lane: 'stategraph', reason: 'action_phrase_override', signalType: null };
-  }
-
-  // ── 3. StateGraph running → intercept to fast lane (chitchat/filler only) ──
-  // Only reaches here if none of the above action overrides matched, meaning the
-  // utterance is likely chitchat, a question, or filler — safe to fast-lane.
-  if (isRunning) {
-    logger.info('[Router] → FAST LANE (sg running — intercepted)', { text: text.substring(0, 60) });
-    return { lane: 'fast', reason: 'sg_running_question', signalType: null };
-  }
-
-  // ── 3. Embedding classifier → fast vs stategraph ──────────────────────────
-  const result = await classifier.classify(text);
-  const reason = result.lane === 'fast' ? 'classifier_fast' : 'classifier_stategraph';
-  logger.info(`[Router] → ${result.lane.toUpperCase()} LANE (${reason})`, {
-    text: text.substring(0, 60),
-    fastScore: result.fastScore,
-    sgScore: result.sgScore,
-  });
-  return { lane: result.lane, reason, signalType: null };
+  // ── All other utterances → fast lane ──────────────────────────────────────
+  // The LLM will respond with personality and, if needed, a trigger phrase
+  // that escalates the task to StateGraph automatically.
+  logger.info('[Router] → FAST LANE (voice-first)', { text: text.substring(0, 60) });
+  return { lane: 'fast', reason: 'voice_first', signalType: null };
 }
 
-module.exports = { route };
+/**
+ * Detect whether a USER'S UTTERANCE (English translation) signals an intent
+ * that requires StateGraph execution — live data, computer actions, memory lookups.
+ *
+ * This is run BEFORE calling the LLM so actionable requests skip the LLM
+ * round-trip entirely and get a canned holding phrase immediately.
+ *
+ * @param {string} englishUserText - English translation of the user's speech
+ * @returns {{ shouldTrigger: boolean, triggerType: string|null }}
+ */
+function detectUserIntentTrigger(englishUserText) {
+  if (!englishUserText || !englishUserText.trim()) return { shouldTrigger: false, triggerType: null };
+
+  const text = englishUserText.toLowerCase().trim();
+
+  // ── Live data lookups (weather, prices, scores, news, time, stocks) ────────
+  if (/\b(what('s| is) (the )?(weather|temperature|forecast|price|cost|score|news|time|date|rate|stock|bitcoin|crypto|btc|eth|market)|weather (in|for|at)|forecast (for|in)|current (price|rate|weather|temperature|score)|latest (news|price|score|update)|how much (is|does|did)|how (many|far|long|fast|old|tall|big|large)|what time|what('s| is) today|who (won|is winning|leads|scored)|when (does|did|is|was)|look up|find out|search for|tell me (about|the|what|who|when|where|how)|what are the|show me the|get me the|pull up the)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
+  // ── Computer / desktop actions ─────────────────────────────────────────────
+  if (/\b(open (up )?|close |quit |launch |start |stop |minimize |maximize |hide |show |switch to |go to |navigate to |type |click |press |scroll |drag |resize |move |focus |paste |copy |cut |undo |redo |install |download |upload |delete |remove |rename |save |run |execute |create (a |an |new )?|make (a |an |new )?)\b/.test(text) &&
+      /\b(app|application|window|tab|browser|chrome|safari|firefox|terminal|finder|slack|zoom|notion|vscode|code|editor|file|folder|document|spreadsheet|email|message|text|button|link|menu|settings|system|desktop|screen)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'computer_action' };
+  }
+
+  // NOTE: Memory store/retrieve and research patterns are intentionally NOT here.
+  // Those are handled by the LLM via trigger phrases in detectLLMTrigger.
+  // Putting ambiguous patterns here causes false positives BEFORE the LLM can
+  // correct them (e.g. "save that file" → wrongly triggers memory_store).
+  // The LLM is the reliable gate for anything nuanced.
+
+  return { shouldTrigger: false, triggerType: null };
+}
+
+/**
+ * Detect whether an LLM RESPONSE contains a StateGraph trigger phrase.
+ * These are the exact phrases the butler prompt instructs the LLM to use
+ * when it needs real execution. Run AFTER the LLM call as a safety net.
+ *
+ * @param {string} llmResponse
+ * @returns {{ shouldTrigger: boolean, triggerType: string|null }}
+ */
+function detectLLMTrigger(llmResponse) {
+  if (!llmResponse || !llmResponse.trim()) return { shouldTrigger: false, triggerType: null };
+
+  const text = llmResponse.toLowerCase().trim();
+
+  // ── LLM lookup/research acknowledgment phrases ─────────────────────────────
+  if (/\b(let me (check|look|find|search|pull|grab|get|look into|look that up|look into that)|checking (on|that|now|for you)|looking (that up|into that|into it)|searching (for|now)|i'll (check|look|find|search|pull|get|handle|do that)|routing that|passing that|handling that|taking care of that)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
+  // ── LLM research/fetch acknowledgment ─────────────────────────────────────
+  if (/\b(let me (research|investigate|analyze|dig into|pull up)|looking that up|checking the (latest|current|live)|fetching (that|the|live)|getting (that|the latest)|one moment (while i|let me)|just a (moment|second) (while i|let me))\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'research' };
+  }
+
+  // ── LLM computer-action routing phrases ───────────────────────────────────
+  if (/\b(routing that to thinkdrop|passing that along|thinkdrop will handle|on its way to thinkdrop|consider it queued|forwarding that|sending that over)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'computer_action' };
+  }
+
+  // ── LLM memory-store acknowledgment phrases ──────────────────────
+  if (/\b(filing that away|storing that|saving (that|this) to (memory|your records)|committing (that|this) to memory|noted (and stored|for the record)|locking (that|this) in|i('ll| will) (remember|store|save|note|log|record) that|making (a )?note of (that|this))\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'memory_store' };
+  }
+
+  return { shouldTrigger: false, triggerType: null };
+}
+
+/**
+ * Combined trigger detection — checks an arbitrary string against both
+ * user-intent patterns and LLM acknowledgment patterns.
+ *
+ * @param {string} text
+ * @returns {{ shouldTrigger: boolean, triggerType: string|null }}
+ */
+function detectStateGraphTrigger(text) {
+  const a = detectUserIntentTrigger(text);
+  if (a.shouldTrigger) return a;
+  return detectLLMTrigger(text);
+}
+
+/**
+ * Classify whether StateGraph should be escalated by weighing BOTH the
+ * user's English intent AND the LLM answer together.
+ *
+ * Logic:
+ *   - User intent is PRIMARY. If detectUserIntentTrigger fires on the
+ *     user prompt → escalate (LLM gave a holding answer, user clearly wants action).
+ *   - LLM acknowledgment is SECONDARY CONFIRMATION. If detectLLMTrigger fires
+ *     on the LLM response → escalate (LLM itself signalled it needs real execution).
+ *   - Pure chitchat / opinion: neither fires → no escalation.
+ *
+ * Why this beats pre-LLM only or post-LLM only:
+ *   - Pre-LLM only: misses ambiguous requests where context matters.
+ *   - Post-LLM only: fails for non-English users where LLM responds in their
+ *     language (Chinese "让我查一下" won't match English regex).
+ *   - Combined: user intent regex catches the English translation regardless of
+ *     response language; LLM trigger catches English confirmations as a bonus.
+ *
+ * @param {string} userEnglishPrompt - English translation of user speech
+ * @param {string} llmAnswer         - LLM response text
+ * @returns {{ shouldTrigger: boolean, triggerType: string|null }}
+ */
+function classifySGTrigger(userEnglishPrompt, llmAnswer) {
+  // Primary: user's intent (language-agnostic via English translation)
+  const intentCheck = detectUserIntentTrigger(userEnglishPrompt);
+  if (intentCheck.shouldTrigger) return intentCheck;
+
+  // Secondary: LLM explicitly signalled it needs real execution
+  const llmCheck = detectLLMTrigger(llmAnswer);
+  if (llmCheck.shouldTrigger) return llmCheck;
+
+  return { shouldTrigger: false, triggerType: null };
+}
+
+module.exports = { route, detectStateGraphTrigger, detectUserIntentTrigger, detectLLMTrigger, classifySGTrigger };

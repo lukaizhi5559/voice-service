@@ -390,4 +390,49 @@ async function classifyLLMResponse(responseText) {
   }
 }
 
-module.exports = { warmUp, classify, classifyLLMResponse };
+/**
+ * Classify whether a new user prompt is a fresh task vs a reply to a paused question.
+ * Uses cosine similarity between prompt and pausedQuestion embeddings.
+ *
+ * @param {string} prompt
+ * @param {string|null} pausedQuestion
+ * @returns {Promise<{ isFreshTask: boolean, similarity: number|null, isActionCommand: boolean }>}
+ */
+async function classifyFreshTask(prompt, pausedQuestion) {
+  if (!prompt) return { isFreshTask: false, similarity: 1, isActionCommand: false };
+
+  try {
+    if (!_initialized) {
+      warmUp();
+      if (_initPromise) await _initPromise;
+    }
+    if (!_initialized) {
+      return { isFreshTask: false, similarity: null, isActionCommand: false };
+    }
+
+    const embedder = await getPipeline();
+    const promptEmb = await embed(embedder, prompt);
+
+    const sgScore   = meanScore(promptEmb, _stategraphEmbeddings);
+    const fastScore = meanScore(promptEmb, _fastEmbeddings);
+    const isActionCommand = sgScore > fastScore;
+
+    if (!pausedQuestion) {
+      const isFreshTask = isActionCommand && sgScore > 0.38;
+      return { isFreshTask, similarity: null, isActionCommand };
+    }
+
+    const questionEmb = await embed(embedder, pausedQuestion);
+    const similarity = cosine(promptEmb, questionEmb);
+
+    const FRESH_THRESHOLD = 0.35;
+    const ACTION_WEAK_THRESHOLD = 0.55;
+    const isFreshTask = similarity < FRESH_THRESHOLD || (isActionCommand && similarity < ACTION_WEAK_THRESHOLD);
+
+    return { isFreshTask, similarity, isActionCommand };
+  } catch (err) {
+    return { isFreshTask: false, similarity: null, isActionCommand: false, error: err.message };
+  }
+}
+
+module.exports = { warmUp, classify, classifyLLMResponse, classifyFreshTask };
