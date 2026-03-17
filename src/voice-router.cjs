@@ -53,6 +53,27 @@ function route(englishText) {
     return { lane: 'fast', reason: 'resume_signal', signalType: 'resume' };
   }
 
+  // ── SG noise suppression ───────────────────────────────────────────────────
+  // While StateGraph is actively running, suppress ambient noise / background chatter
+  // so it doesn't corrupt the ongoing task. Only allow through:
+  //   1. Wake phrases (thinkdrop, hey think, etc.)
+  //   2. Explicit control commands (cancel, pause, stop — already handled above)
+  //   3. Clear imperative commands with ≥3 words
+  // Everything else is silently dropped with reason 'sg_noise_suppressed'.
+  if (isRunning) {
+    const WAKE_PHRASE_RE = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|listen\s*up|wake\s*up|i\s*need\s*you|are\s*you\s*there)\b/i;
+    const EXPLICIT_COMMAND_RE = /^(stop|cancel|abort|pause|resume|nevermind|never mind|forget it|actually|wait|hold on)\b/i;
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const hasWake = WAKE_PHRASE_RE.test(text);
+    const hasExplicit = EXPLICIT_COMMAND_RE.test(text);
+    const isSubstantial = wordCount >= 4; // 1-3 word utterances during SG are likely noise
+
+    if (!hasWake && !hasExplicit && !isSubstantial) {
+      logger.info('[Router] → SG NOISE SUPPRESSED (SG running, utterance too short/ambient)', { text: text.substring(0, 60), wordCount });
+      return { lane: 'fast', reason: 'sg_noise_suppressed', signalType: null };
+    }
+  }
+
   // ── All other utterances → fast lane ──────────────────────────────────────
   // The LLM will respond with personality and, if needed, a trigger phrase
   // that escalates the task to StateGraph automatically.
@@ -80,6 +101,38 @@ function detectUserIntentTrigger(englishUserText) {
     return { shouldTrigger: true, triggerType: 'action_lookup' };
   }
 
+  // ── Web research / online search requests ──────────────────────────────────
+  // Catches: "go online to X", "go to X website", "search on X", "help me find",
+  // "find some places", "visit X", "look on X", "check X" — the kind of requests
+  // that come from non-English speakers after translation.
+  if (/\b(go (online|to the|to a|on)|visit (the |a )?(website|site|page)|search (on|in|using|with|at)|help me find|find (me |some |a |the )?|look (on|at|in|up)|check (on |out |the )?|browse (to|the)|open (the |a )?(website|site|page|browser)|(go|navigate|head) to .{1,40}(website|site|\.com|\.org|\.net|perplexity|claude|chatgpt|google|bing|youtube|reddit|twitter|instagram|facebook|amazon|wikipedia|github|notion|slack|zoom|discord|spotify|netflix|linkedin|tiktok|pinterest|whatsapp|telegram|gmail|outlook|calendar|maps|weather|news))\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
+  // ── Online service / website navigation by name ────────────────────────────
+  // Catches: "go to Perplexity", "open Claude", "visit the Perplexity website" etc.
+  // Uses .{0,20} to allow words between action verb and service name.
+  if (/\b(go to|open|visit|launch|search (on|with|using|at)|use|check out|browse).{0,20}(perplexity|claude|chatgpt|openai|google|bing|youtube|reddit|twitter|instagram|facebook|amazon|wikipedia|github|notion|slack|zoom|discord|spotify|netflix|linkedin|tiktok|gmail|outlook|calendar)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
+  // ── Past-tense / "I want to" translation patterns ─────────────────────────
+  // Chinese/Spanish/etc. voice commands often translate to past tense or "I want to" form.
+  // e.g. "我上網去Claud" → "I went online to Claude" (past tense, still a request)
+  //      "我想你幫我找" → "I want you to help me find"
+  // Catch these by detecting past-tense navigation + service/site name, OR "I want/need" + action.
+  if (/\b(went online to|went to (the )?(perplexity|claude|chatgpt|openai|google|bing|youtube|reddit|amazon|wikipedia|github|notion|spotify|netflix|gmail|claud|claws?)\b|i (want|need|would like|'d like) (you to |to )?(help me |go |open |search |find |look |check |visit |navigate |browse ))\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
+  // ── Service name mentioned with any action context (broad catch for translated requests) ──
+  // When translation gives us something like "found some X at Perplexity" or "went to Perplexity
+  // and found Y" — if a known service name appears alongside a task verb, treat as SG trigger.
+  if (/\b(perplexity|claude|chatgpt|openai)\b/.test(text) &&
+      /\b(find|found|search|look|check|get|fetch|compare|show|tell|help|go|went|visit|browse|open|use|using)\b/.test(text)) {
+    return { shouldTrigger: true, triggerType: 'action_lookup' };
+  }
+
   // ── Computer / desktop actions ─────────────────────────────────────────────
   if (/\b(open (up )?|close |quit |launch |start |stop |minimize |maximize |hide |show |switch to |go to |navigate to |type |click |press |scroll |drag |resize |move |focus |paste |copy |cut |undo |redo |install |download |upload |delete |remove |rename |save |run |execute |create (a |an |new )?|make (a |an |new )?)\b/.test(text) &&
       /\b(app|application|window|tab|browser|chrome|safari|firefox|terminal|finder|slack|zoom|notion|vscode|code|editor|file|folder|document|spreadsheet|email|message|text|button|link|menu|settings|system|desktop|screen)\b/.test(text)) {
@@ -95,21 +148,37 @@ function detectUserIntentTrigger(englishUserText) {
   return { shouldTrigger: false, triggerType: null };
 }
 
+// ── Conversational questions that must NEVER trigger SG escalation ─────────────────
+// These are pure chitchat / capability questions. The LLM answering them will
+// naturally use "let me get you the list" or "let me look at my capabilities"
+// but those are NOT execution requests — they are conversational fillers.
+const CONVERSATIONAL_EXCLUSION_RE = /\b(what (can|do|are|is) (you|thinkdrop|i)|can you (speak|talk|understand|help|do|tell|explain|show)|who are you|what are you|how do you work|are you (able|capable|good|smart)|tell me about (yourself|you|thinkdrop)|what('s| is) your (name|purpose|role|job|function|capability|capabilit)|can (i|we) (ask|use|try)|is this (working|on|live|recording)|do you (understand|speak|know|remember)|are you (there|listening|awake|active|online|ready)|hello|hi there|hey|greetings|good (morning|afternoon|evening|night))\b/i;
+
 /**
  * Detect whether an LLM RESPONSE contains a StateGraph trigger phrase.
  * These are the exact phrases the butler prompt instructs the LLM to use
  * when it needs real execution. Run AFTER the LLM call as a safety net.
  *
  * @param {string} llmResponse
+ * @param {string} [userPrompt] - Original user prompt used to filter false positives
  * @returns {{ shouldTrigger: boolean, triggerType: string|null }}
  */
-function detectLLMTrigger(llmResponse) {
+function detectLLMTrigger(llmResponse, userPrompt) {
   if (!llmResponse || !llmResponse.trim()) return { shouldTrigger: false, triggerType: null };
+
+  // Guard: if the user asked a conversational/capability question, the LLM's
+  // "let me get/look/find" is a filler phrase — not an execution signal.
+  if (userPrompt && CONVERSATIONAL_EXCLUSION_RE.test(userPrompt.toLowerCase().trim())) {
+    return { shouldTrigger: false, triggerType: null };
+  }
 
   const text = llmResponse.toLowerCase().trim();
 
-  // ── LLM lookup/research acknowledgment phrases ─────────────────────────────
-  if (/\b(let me (check|look|find|search|pull|grab|get|look into|look that up|look into that)|checking (on|that|now|for you)|looking (that up|into that|into it)|searching (for|now)|i'll (check|look|find|search|pull|get|handle|do that)|routing that|passing that|handling that|taking care of that)\b/.test(text)) {
+  // ── LLM lookup/research acknowledgment phrases ─────────────────────────────────────
+  // "let me get/look/find" requires a specific target noun to count — not just conversational filler.
+  // e.g. "let me look that up" ✓ | "let me get that for you" ✓ | "let me get you the list" ✓
+  // but "let me think" ✗ | "let me be clear" ✗
+  if (/\b(let me (check|look that up|look into that|look into it|find that|search|pull that|grab that|get that|get the latest|get you the)|checking (on that|that now|for you now)|looking (that up|into that|into it)|searching (for that|that now)|i'll (check that|look that up|find that|search for|pull that|get that|handle that|do that)|routing that|passing that|handling that|taking care of that)\b/.test(text)) {
     return { shouldTrigger: true, triggerType: 'action_lookup' };
   }
 
@@ -172,7 +241,8 @@ function classifySGTrigger(userEnglishPrompt, llmAnswer) {
   if (intentCheck.shouldTrigger) return intentCheck;
 
   // Secondary: LLM explicitly signalled it needs real execution
-  const llmCheck = detectLLMTrigger(llmAnswer);
+  // Pass userPrompt so conversational exclusion guard can filter false positives
+  const llmCheck = detectLLMTrigger(llmAnswer, userEnglishPrompt);
   if (llmCheck.shouldTrigger) return llmCheck;
 
   return { shouldTrigger: false, triggerType: null };

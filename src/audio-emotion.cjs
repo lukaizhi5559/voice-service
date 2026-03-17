@@ -39,7 +39,7 @@ const VARIANCE_LOW  = 0.003;  // RMS variance < this → flat / sad / neutral
  *
  * @param {string} audioBase64 - Base64 encoded audio (WAV/WebM/MP4)
  * @param {{ format?: string, transcript?: string }} opts
- * @returns {{ emotion: string, intensity: 'low'|'medium'|'high', tags: string[], context: string }}
+ * @returns {{ emotion: string, intensity: 'low'|'medium'|'high', tags: string[], context: string, speakerProfile: { gender: 'male'|'female'|'child'|'unknown', ageGroup: 'child'|'adult', volume: 'loud'|'normal'|'quiet'|'whisper', address: 'sir'|"ma'am"|'friend'|'' } }}
  */
 function detectEmotion(audioBase64, opts = {}) {
   try {
@@ -68,6 +68,7 @@ function detectEmotion(audioBase64, opts = {}) {
     const peak = _computePeak(samples);
     const crest = peak > 0 ? peak / (rms + 1e-10) : 10;
     const variance = _computeWindowedVariance(samples);
+    const speakerProfile = _estimateSpeakerProfile(samples, 16000, rms);
 
     logger.debug('[AudioEmotion] Analysis', {
       rms: rms.toFixed(4),
@@ -81,50 +82,162 @@ function detectEmotion(audioBase64, opts = {}) {
 
     // Yelling / angry — loud AND compressed (low crest factor) AND high variance
     if (rms > ENERGY_HIGH && crest < CREST_YELL && variance > VARIANCE_HIGH) {
-      return _result('angry', 'high', ['[angry]'],
-        'The user appears to be speaking loudly or with frustration. Mirror their intensity with direct, confident energy — no hedging.');
+      return _withProfile(_result('angry', 'high', ['[angry]'],
+        'The user appears to be speaking loudly or with frustration. Mirror their intensity with direct, confident energy — no hedging.'), speakerProfile);
     }
 
     // Loud and excited (high crest — dynamic, not compressed yelling)
     if (rms > ENERGY_HIGH && crest >= CREST_YELL && variance > VARIANCE_HIGH) {
-      return _result('excited', 'high', ['[excited]'],
-        'The user sounds energized and enthusiastic. Match that energy — be upbeat and engaged.');
+      return _withProfile(_result('excited', 'high', ['[excited]'],
+        'The user sounds energized and enthusiastic. Match that energy — be upbeat and engaged.'), speakerProfile);
     }
 
     // Loud and somewhat agitated (medium variance)
     if (rms > ENERGY_HIGH && variance >= VARIANCE_LOW) {
-      // Combine with text cues if available
       if (textEmotion && textEmotion.emotion === 'angry') {
-        return _result('angry', 'medium', ['[angry]'],
-          'The user sounds somewhat raised or tense. Stay calm and direct.');
+        return _withProfile(_result('angry', 'medium', ['[angry]'],
+          'The user sounds somewhat raised or tense. Stay calm and direct.'), speakerProfile);
       }
-      return _result('excited', 'medium', ['[excited]'],
-        'The user sounds expressive and engaged. Be responsive and energetic.');
+      return _withProfile(_result('excited', 'medium', ['[excited]'],
+        'The user sounds expressive and engaged. Be responsive and energetic.'), speakerProfile);
     }
 
     // Soft and flat — possible sadness or tiredness
     if (rms < ENERGY_LOW && variance < VARIANCE_LOW) {
       if (textEmotion && (textEmotion.emotion === 'sad' || textEmotion.emotion === 'empathetic')) {
-        return textEmotion;
+        return _withProfile(textEmotion, speakerProfile);
       }
-      return _result('empathetic', 'low', ['[empathetic]'],
-        'The user is speaking softly. Be gentle, warm, and supportive.');
+      return _withProfile(_result('empathetic', 'low', ['[empathetic]'],
+        'The user is speaking softly. Be gentle, warm, and supportive.'), speakerProfile);
     }
 
     // Normal energy with high variance — enthusiastic normal conversation
     if (variance > VARIANCE_HIGH) {
-      return _result('happy', 'medium', ['[happy]'],
-        'The user sounds upbeat and conversational. Be warm and friendly.');
+      return _withProfile(_result('happy', 'medium', ['[happy]'],
+        'The user sounds upbeat and conversational. Be warm and friendly.'), speakerProfile);
     }
 
     // Text cues win if audio is neutral
-    if (textEmotion) return textEmotion;
+    if (textEmotion) return _withProfile(textEmotion, speakerProfile);
 
-    return _neutral();
+    return _withProfile(_neutral(), speakerProfile);
   } catch (err) {
     logger.debug('[AudioEmotion] Analysis failed (non-critical)', { error: err.message });
     return _neutral();
   }
+}
+
+/**
+ * Estimate speaker profile from PCM samples.
+ *
+ * Technique: Zero-Crossing Rate (ZCR) as an F0 proxy.
+ * Zero-crossings per second ≈ 2× fundamental frequency for voiced speech.
+ *
+ *   Child   : ZCR-based F0 ≈ 250-500 Hz  → ZCR > ~500 crossings/sec
+ *   Female  : ZCR-based F0 ≈ 165-255 Hz  → ZCR ~330-510
+ *   Male    : ZCR-based F0 ≈  85-180 Hz  → ZCR ~170-360
+ *
+ * Ranges overlap, so we use median ZCR across voiced frames (RMS > noise floor)
+ * to get a more stable estimate. This is a heuristic — it works well for clear
+ * single-speaker audio at 16kHz.
+ *
+ * Volume detection: based on RMS vs thresholds (already computed in detectEmotion).
+ *
+ * @param {Float32Array|number[]} samples  - Normalized PCM [-1, 1]
+ * @param {number} sampleRate              - Sample rate in Hz (default 16000)
+ * @param {number} rms                     - Already-computed RMS
+ * @returns {{ gender: string, ageGroup: string, volume: string, address: string, f0Estimate: number }}
+ */
+function _estimateSpeakerProfile(samples, sampleRate, rms) {
+  sampleRate = sampleRate || 16000;
+
+  // ── Volume classification ────────────────────────────────────────────────────
+  let volume;
+  if (rms > ENERGY_HIGH) {
+    volume = 'loud';
+  } else if (rms < 0.01) {
+    volume = 'whisper';
+  } else if (rms < ENERGY_LOW) {
+    volume = 'quiet';
+  } else {
+    volume = 'normal';
+  }
+
+  // ── Zero-crossing rate on voiced frames ─────────────────────────────────────
+  const FRAME_SIZE   = 512;          // ~32ms at 16kHz
+  const NOISE_FLOOR  = 0.015;        // minimum RMS to consider a frame voiced
+  const ZCR_CHILD    = 500;          // crossings/sec above this → child
+  const ZCR_FEMALE_LO = 300;         // female range lower bound
+  const ZCR_MALE_HI  = 380;          // male/female overlap upper bound for male majority
+
+  const frameZcrs = [];
+
+  for (let i = 0; i + FRAME_SIZE < samples.length; i += FRAME_SIZE) {
+    // Only analyze voiced frames
+    let frameSumSq = 0;
+    for (let j = i; j < i + FRAME_SIZE; j++) frameSumSq += samples[j] * samples[j];
+    const frameRms = Math.sqrt(frameSumSq / FRAME_SIZE);
+    if (frameRms < NOISE_FLOOR) continue;
+
+    // Count zero crossings in this frame
+    let crossings = 0;
+    for (let j = i + 1; j < i + FRAME_SIZE; j++) {
+      if ((samples[j] >= 0 && samples[j - 1] < 0) || (samples[j] < 0 && samples[j - 1] >= 0)) {
+        crossings++;
+      }
+    }
+    // ZCR in crossings per second
+    const frameDurationSec = FRAME_SIZE / sampleRate;
+    frameZcrs.push(crossings / frameDurationSec);
+  }
+
+  if (frameZcrs.length === 0) {
+    return { gender: 'unknown', ageGroup: 'adult', volume, address: '', f0Estimate: 0 };
+  }
+
+  // Use median ZCR across voiced frames (robust against outlier frames)
+  frameZcrs.sort((a, b) => a - b);
+  const mid = Math.floor(frameZcrs.length / 2);
+  const medianZcr = frameZcrs.length % 2 !== 0
+    ? frameZcrs[mid]
+    : (frameZcrs[mid - 1] + frameZcrs[mid]) / 2;
+
+  // F0 estimate: ZCR ≈ 2 * F0 for voiced speech
+  const f0Estimate = medianZcr / 2;
+
+  // ── Classification ────────────────────────────────────────────────────────────
+  let gender, ageGroup, address;
+
+  if (medianZcr > ZCR_CHILD) {
+    // High ZCR → child (or very high female — check RMS energy too)
+    // Children also tend to have more variable energy; default to child
+    gender   = 'child';
+    ageGroup = 'child';
+    address  = 'friend';
+  } else if (medianZcr >= ZCR_FEMALE_LO) {
+    // Mid-to-high ZCR range → likely female adult
+    gender   = 'female';
+    ageGroup = 'adult';
+    address  = "ma'am";
+  } else if (medianZcr < ZCR_FEMALE_LO && medianZcr > 0) {
+    // Lower ZCR → likely male adult
+    gender   = 'male';
+    ageGroup = 'adult';
+    address  = 'sir';
+  } else {
+    gender   = 'unknown';
+    ageGroup = 'adult';
+    address  = '';
+  }
+
+  logger.debug('[AudioEmotion] SpeakerProfile', {
+    medianZcr: medianZcr.toFixed(1),
+    f0Estimate: f0Estimate.toFixed(1),
+    gender, ageGroup, volume,
+    voicedFrames: frameZcrs.length,
+  });
+
+  return { gender, ageGroup, volume, address, f0Estimate };
 }
 
 // ── Text cue analysis ──────────────────────────────────────────────────────────
@@ -211,12 +324,18 @@ function _computeWindowedVariance(samples, windowSize = 320) {
 
 // ── Result builders ────────────────────────────────────────────────────────────
 
+const _defaultProfile = { gender: 'unknown', ageGroup: 'adult', volume: 'normal', address: '', f0Estimate: 0 };
+
 function _result(emotion, intensity, tags, context) {
-  return { emotion, intensity, tags, context };
+  return { emotion, intensity, tags, context, speakerProfile: _defaultProfile };
 }
 
 function _neutral() {
-  return { emotion: 'neutral', intensity: 'low', tags: [], context: '' };
+  return { emotion: 'neutral', intensity: 'low', tags: [], context: '', speakerProfile: _defaultProfile };
 }
 
-module.exports = { detectEmotion };
+function _withProfile(result, profile) {
+  return Object.assign({}, result, { speakerProfile: profile || _defaultProfile });
+}
+
+module.exports = { detectEmotion, _estimateSpeakerProfile };

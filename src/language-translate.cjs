@@ -5,17 +5,17 @@
  *   - Input: any language → English (for StateGraph)
  *   - Output: English → user's detected language (for TTS response)
  *
- * Strategy:
- *   1. ElevenLabs Scribe already provides language_code on transcription — use that first
- *   2. If language is English → pass through, no API call needed
- *   3. If non-English → translate using LLM (WebSocket backend) or simple prompt
+ * Translation provider priority (no subscriptions required):
+ *   1. OpenAI gpt-4o-mini  — direct HTTPS, uses OPENAI_API_KEY (pay-per-use, ~$0.15/1M tokens)
+ *   2. Gemini 2.0 Flash    — direct HTTPS, uses GEMINI_API_KEY (free quota available)
+ *   3. LLM WebSocket       — ThinkDrop backend on ws://localhost:4000 (always-on fallback)
  *
- * Supported languages (primary focus): zh, es, en, fr, pt, ar, ja, ko, hi, de, it, ru
+ * Supported languages: zh, es, en, fr, pt, ar, ja, ko, hi, de, it, ru
  */
 
 'use strict';
 
-const axios = require('axios');
+const https = require('https');
 const logger = require('./logger.cjs');
 
 const SUPPORTED_LANGUAGES = (process.env.SUPPORTED_LANGUAGES || 'en,zh,es,fr,pt,ar,ja,ko,hi,de,it,ru').split(',');
@@ -47,29 +47,51 @@ const ISO3_TO_ISO1 = {
   rus: 'ru', zho: 'zh', cmn: 'zh', yue: 'zh',
 };
 
+// Full English language names → ISO 639-1
+// Groq whisper-large-v3 returns these full names during auto-detection
+const FULL_NAME_TO_ISO1 = {
+  english: 'en', chinese: 'zh', mandarin: 'zh', cantonese: 'zh',
+  spanish: 'es', french: 'fr', portuguese: 'pt', arabic: 'ar',
+  japanese: 'ja', korean: 'ko', hindi: 'hi', german: 'de',
+  italian: 'it', russian: 'ru', dutch: 'nl', turkish: 'tr',
+  polish: 'pl', swedish: 'sv', norwegian: 'no', danish: 'da',
+  finnish: 'fi', czech: 'cs', romanian: 'ro', hungarian: 'hu',
+  greek: 'el', hebrew: 'he', thai: 'th', vietnamese: 'vi',
+  indonesian: 'id', malay: 'ms', ukrainian: 'uk',
+};
+
 function normalizeLanguage(langCode) {
   if (!langCode) return 'en';
   const base = langCode.toLowerCase().split('-')[0];
   if (ISO3_TO_ISO1[base]) return ISO3_TO_ISO1[base];
+  if (FULL_NAME_TO_ISO1[base]) return FULL_NAME_TO_ISO1[base];
   if (base === 'zh') return 'zh';
   return base;
 }
 
+// ── Shared translate prompt ───────────────────────────────────────────────────
+function _translatePrompt(text, fromName, toName) {
+  return `Translate the following ${fromName} text to ${toName}. Return ONLY the translation — no explanation, no quotes, no commentary.
+IMPORTANT: Preserve the original intent and tone exactly. If the text is a request, command, or instruction (even if grammatically first-person in ${fromName}), translate it as a present-tense request or command in ${toName}. For example: "我上網去Google" → "Go online to Google" (not "I went online to Google").\n\nText: ${text}`;
+}
+
 /**
- * Translate text from any language to English using LLM backend.
+ * Translate text between any two languages.
+ * Uses the full llm-providers.cjs chain:
+ *   openai → claude → gemini → grok → mistral → deepseek → LLM WebSocket
  *
  * @param {Object} args
  * @param {string} args.text          - Text to translate
  * @param {string} args.fromLanguage  - Source language code (e.g. 'zh', 'es')
  * @param {string} [args.toLanguage]  - Target language (default: 'en')
- * @returns {Promise<{translated: string, fromLanguage: string, toLanguage: string}>}
+ * @returns {Promise<{translated: string, fromLanguage: string, toLanguage: string, provider: string}>}
  */
 async function translate({ text, fromLanguage, toLanguage = 'en' }) {
   const from = normalizeLanguage(fromLanguage);
   const to = normalizeLanguage(toLanguage);
 
   if (from === to) {
-    return { translated: text, fromLanguage: from, toLanguage: to };
+    return { translated: text, fromLanguage: from, toLanguage: to, provider: 'passthrough' };
   }
 
   const fromName = LANGUAGE_NAMES[from] || from;
@@ -77,9 +99,26 @@ async function translate({ text, fromLanguage, toLanguage = 'en' }) {
 
   logger.info('[Translate]', { from: fromName, to: toName, textPreview: text.substring(0, 60) });
 
-  const translated = await _translateViaLLM({ text, fromName, toName });
+  // ── Try full provider chain (openai → claude → gemini → grok → mistral → deepseek) ────────────
+  const { ask } = require('./llm-providers.cjs');
+  const translateMessages = [
+    { role: 'system', content: 'You are a professional translator. Translate exactly what is given. Return ONLY the translation with no extra text, no quotes, no explanation.' },
+    { role: 'user',   content: _translatePrompt(text, fromName, toName) },
+  ];
+  const { text: chainResult, provider: chainProvider } = await ask(translateMessages, {
+    maxTokens: 500,
+    temperature: 0.1,
+    timeoutMs: 10000,
+  });
+  if (chainResult) {
+    logger.info('[Translate] Provider chain success', { provider: chainProvider, from, to });
+    return { translated: chainResult.trim(), fromLanguage: from, toLanguage: to, provider: chainProvider };
+  }
 
-  return { translated: translated.trim(), fromLanguage: from, toLanguage: to };
+  // ── Last resort: LLM WebSocket (ThinkDrop backend) ───────────────────────────────
+  logger.info('[Translate] All HTTPS providers failed, falling back to LLM WebSocket', { from, to });
+  const translated = await _translateViaLLM({ text, fromName, toName });
+  return { translated: translated.trim(), fromLanguage: from, toLanguage: to, provider: 'llm-ws' };
 }
 
 /**
@@ -194,12 +233,17 @@ async function toEnglish(sttResult) {
   const { text, language } = sttResult;
   let detectedLanguage = normalizeLanguage(language || 'en');
 
-  // Override if STT reports English but text is clearly a non-Latin script
-  if (detectedLanguage === 'en') {
+  // Override if STT reports 'en' OR 'und' (undetermined) but text has a clear non-Latin script.
+  // Groq whisper-large-v3-turbo returns 'und' when no language param is passed.
+  if (detectedLanguage === 'en' || detectedLanguage === 'und') {
     const scriptLang = detectScriptLanguage(text);
     if (scriptLang) {
-      logger.info('[Translate] Script-override: STT said en but detected script', { scriptLang, textPreview: text.substring(0, 40) });
+      logger.info('[Translate] Script-override: STT said ' + detectedLanguage + ' but detected script', { scriptLang, textPreview: text.substring(0, 40) });
       detectedLanguage = scriptLang;
+    } else if (detectedLanguage === 'und') {
+      // No script detected and language is undetermined — treat as English to avoid
+      // calling the LLM unnecessarily for ambiguous short utterances.
+      detectedLanguage = 'en';
     }
   }
 

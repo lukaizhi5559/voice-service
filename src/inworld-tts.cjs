@@ -114,21 +114,35 @@ async function synthesizeNative({ text, language = 'en' }) {
 
   logger.info('[TTS] Using native macOS TTS', { voice, language });
 
-  const wavFile = tmpFile.replace('.aiff', '.wav');
+  const mp3File = tmpFile.replace('.aiff', '.mp3');
   return new Promise((resolve, reject) => {
-    const proc = spawn('say', ['-v', voice, '-o', tmpFile, '--data-format=LEI16@22050', text]);
+    // Use '--' separator to guard against special characters in text being interpreted as flags
+    const proc = spawn('say', ['-v', voice, '-o', tmpFile, '--', text]);
     proc.on('close', (code) => {
       if (code !== 0) {
         reject(new Error(`macOS say command failed with code ${code}`));
         return;
       }
       try {
-        // Convert AIFF → WAV so browsers can decode it
-        execSync(`afconvert -f WAVE -d LEI16@22050 "${tmpFile}" "${wavFile}"`, { timeout: 10000 });
-        const audioBuffer = fs.readFileSync(wavFile);
+        // Try MP3 via ffmpeg first (better browser compatibility)
+        let audioBuffer;
+        let format = 'aiff';
+        try {
+          execSync(`ffmpeg -y -i "${tmpFile}" -codec:a libmp3lame -qscale:a 4 "${mp3File}" 2>/dev/null`, { timeout: 10000 });
+          if (fs.existsSync(mp3File)) {
+            audioBuffer = fs.readFileSync(mp3File);
+            format = 'mp3';
+          }
+        } catch (_) {
+          // ffmpeg unavailable — fall back to raw AIFF
+        }
+        if (!audioBuffer) {
+          audioBuffer = fs.readFileSync(tmpFile);
+          format = 'aiff';
+        }
         try { fs.unlinkSync(tmpFile); } catch (_) {}
-        try { fs.unlinkSync(wavFile); } catch (_) {}
-        resolve({ audioBuffer, format: 'wav', durationEstimateMs: text.length * 70 });
+        try { fs.unlinkSync(mp3File); } catch (_) {}
+        resolve({ audioBuffer, format, durationEstimateMs: text.split(/\s+/).length * 460 });
       } catch (err) {
         reject(err);
       }

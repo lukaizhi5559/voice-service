@@ -26,7 +26,6 @@ const crypto = require('crypto');
 const WebSocket = require('ws');
 const logger = require('./logger.cjs');
 const stt = require('./stt.cjs');
-const tts = require('./inworld-tts.cjs');
 const voiceProvider = require('./voice-provider.cjs');
 const { toEnglish, fromEnglish, normalizeLanguage, LANGUAGE_NAMES } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
@@ -43,7 +42,8 @@ const STATEGRAPH_WS_URL = process.env.STATEGRAPH_WS_URL || 'ws://localhost:4000/
 const STATEGRAPH_API_KEY = process.env.STATEGRAPH_API_KEY || '';
 
 // ── Fast Lane Butler Persona ──────────────────────────────────────────────────
-// Loaded from prompts/fast-lane-butler.md — edit there to change tone/wording.
+// Loaded from prompts/fast-lane-butler.md — static base, never changes at runtime.
+// The live personality overlay (mood + traits) is fetched per-request from personality-service.
 function _loadFastLanePrompt() {
   try {
     return fs.readFileSync(path.join(__dirname, 'prompts/fast-lane-butler.md'), 'utf8').trim();
@@ -51,7 +51,85 @@ function _loadFastLanePrompt() {
     return 'You are ThinkDrop\'s voice assistant. Be concise, helpful, and use no markdown.';
   }
 }
-const FAST_LANE_SYSTEM_PROMPT = _loadFastLanePrompt();
+const FAST_LANE_BASE_PROMPT = _loadFastLanePrompt();
+
+// ── Personality overlay fetch ──────────────────────────────────────────────────
+// Fetches the live THINKDROP LIVE STATE block from personality-service (port 3008).
+// Falls back to empty string if personality-service is down — zero breakage.
+const PERSONALITY_SERVICE_PORT = parseInt(process.env.PERSONALITY_SERVICE_PORT || '3012', 10);
+
+function _fetchPersonalityOverlay() {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ version: 'mcp.v1', service: 'personality-service', action: 'personality.overlay', payload: {}, requestId: 'vs_' + Date.now() });
+    const req = http.request({
+      hostname: '127.0.0.1', port: PERSONALITY_SERVICE_PORT,
+      path: '/personality.overlay', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 500,
+    }, (res) => {
+      let raw = '';
+      res.on('data', c => { raw += c; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed && parsed.data && parsed.data.overlay ? parsed.data.overlay : '');
+        } catch (_) { resolve(''); }
+      });
+    });
+    req.on('error', () => resolve(''));
+    req.on('timeout', () => { req.destroy(); resolve(''); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Mood context fetch (lightweight — for behavioral modifiers only) ───────────
+function _fetchMoodContext() {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ version: 'mcp.v1', service: 'personality-service', action: 'personality.moodContext', payload: {}, requestId: 'vmc_' + Date.now() });
+    const req = http.request({
+      hostname: '127.0.0.1', port: PERSONALITY_SERVICE_PORT,
+      path: '/personality.moodContext', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 1500,
+    }, (res) => {
+      let raw = '';
+      res.on('data', c => { raw += c; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed && parsed.data ? parsed.data : { mood_label: 'content', behavioral_guidance: '' });
+        } catch (_) { resolve({ mood_label: 'content', behavioral_guidance: '' }); }
+      });
+    });
+    req.on('error', () => resolve({ mood_label: 'content', behavioral_guidance: '' }));
+    req.on('timeout', () => { req.destroy(); resolve({ mood_label: 'content', behavioral_guidance: '' }); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Mood event emission — fire-and-forget ──────────────────────────────────────
+function _fireMoodEvent(eventType, source, reason) {
+  try {
+    const body = JSON.stringify({
+      version: 'mcp.v1', service: 'personality-service',
+      action: 'personality.event',
+      payload: { event_type: eventType, source: source || 'voice', reason: reason || '' },
+      requestId: 'vme_' + Date.now(),
+    });
+    const req = http.request({
+      hostname: '127.0.0.1', port: PERSONALITY_SERVICE_PORT,
+      path: '/personality.event', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 3000,
+    }, () => {});
+    req.on('error', () => {});
+    req.on('timeout', () => { req.destroy(); });
+    req.write(body);
+    req.end();
+  } catch (_) {}
+}
 
 /**
  * Strip Resemble AI / ElevenLabs emotion and paralinguistic tags from text.
@@ -173,7 +251,7 @@ class VoiceServiceMCPServer {
 
     try {
       journal.setVoiceStatus('speaking');
-      const result = await tts.synthesize({ text, language, voiceId, stability, similarity, style });
+      const result = await voiceProvider.synthesize({ text, language, voiceId, stability, similarity, style });
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
 
       return {
@@ -260,12 +338,21 @@ class VoiceServiceMCPServer {
 
     try {
       // ── Step 1: STT ──
-      // Always auto-detect language — Whisper handles multilingual input correctly.
-      // The noise filter below rejects truly unexpected non-English in wake word mode.
-      // Forcing 'en' here would cause Chinese/Spanish/etc. speech to be mangled.
-      // STT_LANGUAGE_HINT env var forces a specific language (e.g. 'zh') when the user
-      // speaks a language that Groq Whisper tends to hallucinate as English phonetics.
-      const effectiveLanguageHint = languageHint || process.env.STT_LANGUAGE_HINT || null;
+      // Language hint strategy — prevent both hallucination AND language locking:
+      //   1. Explicit hint from caller or STT_LANGUAGE_HINT env always wins.
+      //   2. journalSessionLang is only used as a hint for NON-LATIN-SCRIPT languages
+      //      (zh, ja, ko, ar, ru, hi) — Groq Whisper hallucinates these as English phonetics
+      //      without a hint (e.g. "我想上Google" → "I want to go to Google" in English).
+      //   3. For Latin-script languages (en, es, fr, de, etc.) we NEVER pass a hint from
+      //      journal — Groq auto-detects Latin scripts reliably and passing 'zh' here would
+      //      lock English speech into the Chinese decoder (the language-locking bug).
+      //   4. If the user switches from Chinese to English, the next turn produces language='en'
+      //      from Groq auto-detect, setSessionLanguage('en') is called, and the lock releases.
+      const NON_LATIN_LANGS = new Set(['zh', 'ja', 'ko', 'ar', 'ru', 'hi', 'th', 'vi', 'uk']);
+      const journalSessionLang = journal.read().voice?.sessionLanguage;
+      const journalHint = (journalSessionLang && NON_LATIN_LANGS.has(journalSessionLang)) ? journalSessionLang : null;
+      const effectiveLanguageHint = languageHint || process.env.STT_LANGUAGE_HINT || journalHint || null;
+      logger.info('[Pipeline] STT language hint', { effectiveLanguageHint, journalSessionLang, callerHint: languageHint || null });
       const sttResult = await voiceProvider.transcribe({ audioBase64, format, languageHint: effectiveLanguageHint });
       logger.info('[Pipeline] STT complete', { text: sttResult.text.substring(0, 80), language: sttResult.language });
 
@@ -317,13 +404,10 @@ class VoiceServiceMCPServer {
       }
 
       // ── Step 2: Wake word check (skip if push-to-talk or explicitly bypassed) ──
-      const detectedLanguage = normalizeLanguage(sttResult.language);
-      journal.setVoiceStatus('processing', { detectedLanguage });
-      // Persist session language as single source of truth — answer.js reads this directly
-      // Always update (including clearing back to 'en') so it doesn't stick across language switches.
-      if (detectedLanguage) {
-        journal.setSessionLanguage(detectedLanguage);
-      }
+      // NOTE: detectedLanguage here is a preliminary value from raw STT.
+      // The authoritative language (with CJK script-override) comes from toEnglish() below.
+      const rawDetectedLanguage = normalizeLanguage(sttResult.language);
+      journal.setVoiceStatus('processing', { detectedLanguage: rawDetectedLanguage });
 
       if (!pushToTalk && !skipWakeWordCheck) {
         const wakeResult = wakeWord.detect(sttResult.text);
@@ -337,7 +421,8 @@ class VoiceServiceMCPServer {
           // No wake phrase — allow through ONLY if transcript starts with a clear question/command word.
           // Word count alone is not sufficient — background chatter can be 5+ words.
           const QUESTION_PREFIX = /^(what|where|when|who|why|how|can|could|will|would|should|is|are|do|does|did|tell|show|find|search|open|help|set|make|get|check|remind|play|create|build|run|send|write|schedule|look up|pull up|turn|type|scroll|press|click|focus|paste|copy|undo|tab|enter|install|list|go to|navigate|switch|close|minimize|maximize|use|using|i want|i need|i would|i('m| am)|i notice|now |let'?s|try|analyze|analyse|examine|delete|remove|save|show me|take|move|rename|read|launch|start|stop|enable|disable|download|upload|please|just|could you|can you|will you|would you|you('re| are| can| should| need| must| never| didn'?t| don'?t| haven'?t| weren'?t| aren'?t)|you just|you only|you still|that'?s|that is|no you|hey you|actually|wait|hold on|never mind|forget that|also|and then|then|after that|next|but|however|instead|again|redo|retry|fix|correct|update)\b/i;
-          const isRealQuestion = QUESTION_PREFIX.test(cleanedText);
+          const hasNonLatinScript = /[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F]/.test(cleanedText);
+          const isRealQuestion = QUESTION_PREFIX.test(cleanedText) || hasNonLatinScript;
 
           if (!isRealQuestion) {
             logger.info('[Pipeline] Wake word skipped — no wake phrase and no clear question/command prefix', { text: sttResult.text.substring(0, 60) });
@@ -349,18 +434,87 @@ class VoiceServiceMCPServer {
         }
       }
 
-      // ── Step 3: Translate to English for StateGraph ──
-      const { englishText, wasTranslated } = await toEnglish(sttResult);
-      logger.info('[Pipeline] Translation', { wasTranslated, englishText: englishText.substring(0, 80) });
-
-      // ── Step 4: Detect audio emotion ────────────────────────────────────────
-      // Analyzes audio energy/variance to infer emotional state (yelling, excited,
-      // sad, neutral). This is passed to the LLM so it can inject Resemble AI
-      // emotion tags into its response for expressive TTS.
-      const emotionResult = detectEmotion(audioBase64 || '', { transcript: englishText }); // audioBase64 may be null for skipSTT path — emotion falls back to text cues only
+      // ── Step 3 + 4a: Translate to English AND detect emotion in parallel ──────
+      // Translation is a network call (~300-800ms). Emotion detection is CPU-only
+      // but uses the transcript — run them concurrently using the raw STT text for
+      // emotion detection (close enough) and await both together.
+      const [translationResult, emotionResult] = await Promise.all([
+        toEnglish(sttResult),
+        Promise.resolve(detectEmotion(audioBase64 || '', { transcript: sttResult.text })),
+      ]);
+      const { englishText, wasTranslated, detectedLanguage } = translationResult;
+      logger.info('[Pipeline] Translation', { wasTranslated, detectedLanguage, englishText: englishText.substring(0, 80) });
+      // Persist the authoritative language (script-override applied) — answer.js reads this directly.
+      if (detectedLanguage) journal.setSessionLanguage(detectedLanguage);
       if (emotionResult.emotion !== 'neutral') {
         logger.info('[Pipeline] Emotion detected', { emotion: emotionResult.emotion, intensity: emotionResult.intensity });
       }
+
+      // ── Step 4b: Voice fingerprint match (fire-and-forget) ───────────────────
+      // Attempt to match the speaker against stored fingerprints.
+      // If no match, auto-enroll as Primary User if this is the first voice seen.
+      // Result is attached to emotionResult.speakerMatch for prompt injection.
+      let speakerMatch = null;
+      if (audioBase64) {
+        try {
+          const vfp = require('./voice-fingerprint.cjs');
+          const sp  = emotionResult.speakerProfile;
+
+          // Extract features from audio for fingerprint ops
+          const features = vfp.extractFeaturesFromBase64(audioBase64, 16000);
+          if (features) {
+            // Try to match first
+            speakerMatch = await vfp.matchSpeaker(
+              // matchSpeaker needs raw samples — re-extract inline
+              (() => {
+                const buf = Buffer.from(audioBase64, 'base64');
+                const isWav = buf.length >= 4 && buf.slice(0, 4).toString('ascii') === 'RIFF';
+                const offset = isWav ? 44 : 0;
+                const s = [];
+                for (let _i = offset; _i < buf.length - 1; _i += 2) s.push(buf.readInt16LE(_i) / 32768.0);
+                return s;
+              })(),
+              16000
+            );
+
+            // Voice pattern flags for this turn
+            const voicePattern = {
+              angry:   emotionResult.emotion === 'angry',
+              loud:    sp && sp.volume === 'loud',
+              whisper: sp && sp.volume === 'whisper',
+            };
+
+            if (speakerMatch && speakerMatch.match_level === 'confirmed') {
+              // Known speaker — update their fingerprint with new sample
+              vfp.enrollOrUpdate(
+                null, 16000,
+                speakerMatch.speaker_id,
+                speakerMatch.speaker_name,
+                sp ? sp.gender : speakerMatch.gender,
+                sp ? sp.age_group : speakerMatch.age_group,
+                voicePattern
+              ).catch(() => {});
+              logger.info('[Pipeline] Speaker identified', {
+                name: speakerMatch.speaker_name,
+                confidence: speakerMatch.confidence.toFixed(3),
+              });
+            } else if (!speakerMatch) {
+              // Unknown — auto-enroll as Primary User (can be renamed later)
+              const spGender   = sp ? sp.gender   : 'unknown';
+              const spAgeGroup = sp ? sp.age_group : 'adult';
+              vfp.enrollOrUpdate(
+                null, 16000, 'spk_primary',
+                'Primary User', spGender, spAgeGroup, voicePattern
+              ).catch(() => {});
+              logger.debug('[Pipeline] No fingerprint match — enrolled as Primary User');
+            }
+          }
+        } catch (_fpErr) {
+          logger.debug('[Pipeline] Fingerprint step skipped', { error: _fpErr.message });
+        }
+      }
+      // Attach speakerMatch to emotionResult so prompt builder can use it
+      if (speakerMatch) emotionResult.speakerMatch = speakerMatch;
 
       // ── Step 5: Route (always fast lane) ─────────────────────────────────────
       const routeResult = router.route(englishText);
@@ -394,7 +548,7 @@ class VoiceServiceMCPServer {
       // Voice-first: always fast lane. SG escalation driven by LLM trigger phrase detection.
       // _fastLaneResponse also pre-starts TTS translation (ttsPromise) in parallel so we
       // can await it concurrently with display translation below — hiding ~300-500ms latency.
-      const fastResult = await this._fastLaneResponse(englishText, routeResult, detectedLanguage, emotionResult);
+      const fastResult = await this._fastLaneResponse(englishText, routeResult, detectedLanguage, emotionResult, sttResult.text);
       responseEnglish = fastResult.text;
       fullAnswerEnglish = fastResult.text;
       responseMetadata = fastResult.metadata || {};
@@ -443,7 +597,11 @@ class VoiceServiceMCPServer {
 
       let fullAnswerDisplay = fullAnswerEnglishClean;
       let responseDisplay = responseEnglishClean;
-      if (needsDisplayTranslation) {
+      // Only call fromEnglish for display if the LLM responded in English AND the user speaks
+      // a different language. When detectedLanguage is non-English, the LLM already responded
+      // in the target language directly — no translation needed, avoids an extra LLM call.
+      const llmRespondedInEnglish = !detectedLanguage || detectedLanguage === 'en';
+      if (needsDisplayTranslation && llmRespondedInEnglish) {
         try {
           const translateFull = fullAnswerEnglishClean
             ? fromEnglish(fullAnswerEnglishClean, displayLang).catch(() => fullAnswerEnglishClean)
@@ -467,6 +625,72 @@ class VoiceServiceMCPServer {
       journal.setVoiceStatus('speaking');
       const ttsResult = await voiceProvider.synthesize(ttsOpts);
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
+
+      // ── Mood event emission (fire-and-forget — does not affect response) ───────
+      try {
+        const textSignal = require('./text-signal.cjs');
+        const textEvt = textSignal.analyze(englishText, []);
+        if (textEvt.event_type) {
+          _fireMoodEvent(textEvt.event_type, 'voice', textEvt.reason);
+        } else if (emotionResult && emotionResult.emotion === 'angry') {
+          _fireMoodEvent('user_raised_voice', 'voice', 'Audio emotion detected: angry');
+        } else if (emotionResult && (emotionResult.emotion === 'sad' || emotionResult.emotion === 'empathetic')) {
+          _fireMoodEvent('user_frustrated', 'voice', 'Audio emotion detected: ' + emotionResult.emotion);
+        } else if (emotionResult && emotionResult.emotion === 'happy') {
+          _fireMoodEvent('positive_feedback', 'voice', 'Audio emotion detected: happy');
+        }
+
+        // ── Name introduction detection ─────────────────────────────────────────
+        // If the user says "my name is Luka" or "call me Emma", rename their fingerprint.
+        // Uses the matched speaker_id from the fingerprint step above (speakerMatch).
+        const detectedName = textSignal.extractName(englishText);
+        if (detectedName) {
+          const sid = speakerMatch ? speakerMatch.speaker_id : 'spk_primary';
+          const renameBody = JSON.stringify({
+            version: 'mcp.v1', service: 'user-memory', action: 'fingerprint.rename',
+            payload: { speaker_id: sid, speaker_name: detectedName },
+            requestId: 'vfp_rename_' + Date.now(),
+          });
+          const rnReq = http.request({
+            hostname: '127.0.0.1', port: parseInt(process.env.MEMORY_SERVICE_PORT || '3001', 10),
+            path: '/fingerprint.rename', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(renameBody) },
+            timeout: 4000,
+          }, () => {});
+          rnReq.on('error', () => {});
+          rnReq.on('timeout', () => { rnReq.destroy(); });
+          rnReq.write(renameBody);
+          rnReq.end();
+          logger.info('[Pipeline] Speaker renamed from voice intro', { name: detectedName, speaker_id: sid });
+        }
+      } catch (_moodErr) {}
+
+      // ── Speaker profile persistence (fire-and-forget) ────────────────────────
+      // Write detected gender/age to personality_traits so heartbeat + synthesis
+      // agent can read the user's profile across sessions.
+      // Only writes when confidence is high (not 'unknown') to avoid overwriting
+      // a good detection with a bad one.
+      try {
+        const sp = emotionResult && emotionResult.speakerProfile;
+        if (sp && sp.gender !== 'unknown' && sp.gender) {
+          const profileValue = sp.gender + '_' + sp.ageGroup; // e.g. 'male_adult', 'female_adult', 'child_child'
+          const body = JSON.stringify({
+            version: 'mcp.v1', service: 'personality-service', action: 'personality.upsertTrait',
+            payload: { trait_key: 'speaker_profile', trait_value: profileValue, source: 'learned', weight: 1.0 },
+            requestId: 'vs_sp_' + Date.now(),
+          });
+          const spReq = http.request({
+            hostname: '127.0.0.1', port: PERSONALITY_SERVICE_PORT,
+            path: '/personality.upsertTrait', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+            timeout: 3000,
+          }, () => {});
+          spReq.on('error', () => {});
+          spReq.on('timeout', () => { spReq.destroy(); });
+          spReq.write(body);
+          spReq.end();
+        }
+      } catch (_spErr) {}
 
       return {
         success: true,
@@ -500,8 +724,16 @@ class VoiceServiceMCPServer {
    * @param {string|null} responseLanguage
    * @param {{ emotion: string, intensity: string, tags: string[], context: string }} emotionResult
    */
-  async _fastLaneResponse(englishText, routeResult, responseLanguage = null, emotionResult = null) {
+  async _fastLaneResponse(englishText, routeResult, responseLanguage = null, emotionResult = null, originalText = null) {
+    // Kick off personality overlay fetch immediately — runs in parallel with signal checks
+    // and prompt assembly so the ~200ms network round-trip is mostly hidden.
+    const overlayPromise = _fetchPersonalityOverlay();
+
     // ── Control signal short-circuits (no LLM needed) ─────────────────────────
+    if (routeResult.reason === 'sg_noise_suppressed') {
+      return { text: null, metadata: { source: 'sg_noise_suppressed' } };
+    }
+
     if (routeResult.reason === 'cancel_signal') {
       const sgState = journal.read().stategraph;
       if (sgState.status === 'running') {
@@ -519,9 +751,44 @@ class VoiceServiceMCPServer {
     }
 
     // ── Build system prompt ────────────────────────────────────────────────────
-    const _fastLang = journal.read().voice?.sessionLanguage || responseLanguage || 'en';
+    const _fastLang = responseLanguage || journal.read().voice?.sessionLanguage || 'en';
     const isResembleActive = voiceProvider.getProviderName() === 'resemble';
-    let _fastSystemPrompt = FAST_LANE_SYSTEM_PROMPT;
+    logger.info('[FastLane] Language', { _fastLang, responseLanguage, sessionLanguage: journal.read().voice?.sessionLanguage });
+
+    // Await the personality overlay — by now the request is already in-flight
+    const personalityOverlay = await overlayPromise;
+    let _fastSystemPrompt = FAST_LANE_BASE_PROMPT;
+    if (personalityOverlay) {
+      _fastSystemPrompt += '\n\n' + personalityOverlay;
+    }
+
+    // ── Speaker profile injection ──────────────────────────────────────────────
+    // Detected from audio ZCR / RMS + fingerprint DB match.
+    const sp  = emotionResult && emotionResult.speakerProfile;
+    const sm  = emotionResult && emotionResult.speakerMatch;  // fingerprint match result
+    if (sp && sp.gender !== 'unknown') {
+      const volNote = sp.volume === 'loud'    ? 'They are speaking loudly — acknowledge their energy without escalating.'
+                    : sp.volume === 'whisper' ? 'They are whispering — respond softly and gently.'
+                    : sp.volume === 'quiet'   ? 'They are speaking quietly — be warm and measured.'
+                    : '';
+      const ageNote = sp.ageGroup === 'child'
+        ? 'This is a child. Use simple, warm, encouraging language. No complex vocabulary. Be patient and kind.'
+        : '';
+      const addressNote = sp.address
+        ? `Address them as "${sp.address}" when appropriate (not every sentence — use sparingly and naturally).`
+        : '';
+      // If we have a confirmed fingerprint match with a real name, add it
+      const nameNote = (sm && sm.speaker_name && sm.speaker_name !== 'Primary User' && sm.match_level === 'confirmed')
+        ? `\nIdentified speaker: ${sm.speaker_name} (confidence: ${(sm.confidence * 100).toFixed(0)}%). You may use their name naturally in conversation.`
+        : sm && sm.match_level === 'confirmed'
+        ? `\nSpeaker recognized as Primary User (${(sm.confidence * 100).toFixed(0)}% match).`
+        : '';
+      // Voice pattern history (if known speaker with a history)
+      const historyNote = sm && (sm.angry_count > 5 || sm.whisper_count > 10)
+        ? `\nVoice history: angry turns=${sm.angry_count}, whisper turns=${sm.whisper_count}, loud turns=${sm.loud_count}. Adapt tone accordingly.`
+        : '';
+      _fastSystemPrompt += `\n\n═══ SPEAKER PROFILE ═══\nDetected: ${sp.gender.toUpperCase()}${sp.ageGroup === 'child' ? ' (CHILD)' : ''} | Volume: ${sp.volume.toUpperCase()}${sp.f0Estimate > 0 ? ` | F0 ≈${Math.round(sp.f0Estimate)}Hz` : ''}\n${addressNote}${ageNote ? '\n' + ageNote : ''}${volNote ? '\n' + volNote : ''}${nameNote}${historyNote}\n═══════════════════`;
+    }
 
     // Only inject emotion tag instructions when Resemble is active — other
     // providers (Cartesia, Inworld, macOS) read the brackets literally.
@@ -536,13 +803,15 @@ class VoiceServiceMCPServer {
     }
 
     // ── LLM call (early-resolve) + combined trigger classification ────────────
-    // _directLLMQueryEarly resolves as soon as the first sentence is complete,
-    // so TTS can start on that sentence immediately. The fullText is used for
-    // trigger classification once the LLM finishes streaming in the background.
+    // When the user speaks non-English, pass the ORIGINAL text directly to the LLM
+    // (which already knows to respond in the target language from _fastLang injection).
+    // This skips the translate-in LLM call, cutting latency from ~4s to ~1s.
+    const isNonEnglish = _fastLang && _fastLang !== 'en';
+    const llmInputText = isNonEnglish && originalText ? originalText : englishText;
     const { classifySGTrigger } = require('./voice-router.cjs');
 
     try {
-      const { firstSentence, fullText } = await this._directLLMQueryEarly(englishText, _fastSystemPrompt);
+      const { firstSentence, fullText } = await this._directLLMQueryEarly(llmInputText, _fastSystemPrompt);
       const spokenAnswer = firstSentence || fullText;
       if (!spokenAnswer || !spokenAnswer.trim()) {
         return { text: "Consider it noted, though I've nothing to add at the moment.", metadata: { source: 'fast_llm_empty' } };
@@ -562,13 +831,14 @@ class VoiceServiceMCPServer {
         });
       }
 
-      // ── Pre-start TTS translation in parallel ────────────────────────────────
-      // Kick off fromEnglish() NOW so the caller can await it concurrently with
-      // display translation rather than sequentially after this function returns.
-      // This hides ~300-500ms of translation latency on non-English responses.
-      const ttsPromise = responseLanguage && responseLanguage !== 'en'
-        ? fromEnglish(spokenAnswer, responseLanguage).catch(() => spokenAnswer)
-        : Promise.resolve(spokenAnswer);
+      // ── TTS: when non-English, LLM already responded in target language — use directly ───
+      // Skip fromEnglish() translate-back call entirely for non-English (saves another ~800ms).
+      // For English, ttsPromise resolves immediately with the original text.
+      const ttsPromise = isNonEnglish
+        ? Promise.resolve(spokenAnswer)   // LLM answered in Chinese/Spanish/etc. directly
+        : responseLanguage && responseLanguage !== 'en'
+          ? fromEnglish(spokenAnswer, responseLanguage).catch(() => spokenAnswer)
+          : Promise.resolve(spokenAnswer);
 
       return { text: spokenAnswer, ttsPromise, metadata: { source: 'fast_llm', triggered: shouldTrigger, triggerType, fullText } };
     } catch (error) {
@@ -714,160 +984,108 @@ class VoiceServiceMCPServer {
   }
 
   // ─── Direct LLM (fast lane) ───────────────────────────────────────────────────
+  // Uses llm-providers.cjs: openai → claude → gemini → grok → mistral → deepseek
+  // Completely decoupled from port 4000 StateGraph WebSocket.
+  // WS fallback only fires when ALL HTTPS providers fail (no keys / all rate-limited).
 
-  _directLLMQuery(text, systemPrompt = null) {
+  /**
+   * Ask the provider chain, return full text string.
+   */
+  async _directLLMQuery(text, systemPrompt = null) {
+    const { ask, buildMessages } = require('./llm-providers.cjs');
+    const messages = buildMessages(text, systemPrompt);
+    const { text: result, provider } = await ask(messages, { maxTokens: 100, temperature: 0.7 });
+    if (result) return result;
+    // All HTTPS providers failed — fall back to WS
+    logger.warn('[FastLane] All HTTPS providers exhausted, falling back to WS');
+    return this._directLLMQueryViaWS(text, systemPrompt);
+  }
+
+  /**
+   * Ask the provider chain, resolve early at first sentence boundary.
+   * Uses askEarly() which streams OpenAI and resolves at first '.?!' (~300-500ms).
+   * Returns { firstSentence, fullText } so TTS can start immediately.
+   */
+  async _directLLMQueryEarly(text, systemPrompt = null) {
+    const { askEarly, buildMessages } = require('./llm-providers.cjs');
+    const messages = buildMessages(text, systemPrompt);
+    const { firstSentence, fullText, provider } = await askEarly(messages, { maxTokens: 150, temperature: 0.7 });
+    if (fullText) {
+      return { firstSentence, fullText };
+    }
+    // All HTTPS providers failed — fall back to WS
+    logger.warn('[FastLane] All HTTPS providers exhausted, falling back to WS (early)');
+    return this._directLLMQueryEarlyViaWS(text, systemPrompt);
+  }
+
+  // ─── WS fallback (used only when ALL HTTPS providers fail) ───────────────────
+
+  _directLLMQueryViaWS(text, systemPrompt = null) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(STATEGRAPH_WS_URL, {
         headers: STATEGRAPH_API_KEY ? { Authorization: `Bearer ${STATEGRAPH_API_KEY}` } : {},
       });
-
       const requestId = `voice_fast_${Date.now()}`;
       let fullText = '';
       let settled = false;
       const timeout = setTimeout(() => {
         if (!settled) { settled = true; ws.close(); resolve(fullText || 'Forgive the delay — no answer came in time.'); }
       }, 15000);
-
       ws.on('open', () => {
         ws.send(JSON.stringify({
-          id: requestId,
-          type: 'llm_request',
-          payload: {
-            prompt: text,
-            provider: 'openai',
-            options: {
-              maxTokens: 80,
-              temperature: 0.7,
-              taskType: 'conversation',
-              responseLength: 'short',
-              model: 'gpt-4o-mini',
-              stream: true,
-            },
-            context: {
-              systemInstructions: systemPrompt || '',
-            },
-          },
-          timestamp: Date.now(),
-          metadata: { source: 'voice_fast_lane' },
+          id: requestId, type: 'llm_request',
+          payload: { prompt: text, provider: 'openai', options: { maxTokens: 100, temperature: 0.7, model: 'gpt-4o-mini', stream: true }, context: { systemInstructions: systemPrompt || '' } },
+          timestamp: Date.now(), metadata: { source: 'voice_fast_lane' },
         }));
       });
-
       ws.on('message', (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.type === 'llm_stream_chunk' && msg.payload?.text) {
-            fullText += msg.payload.text;
-          } else if (msg.type === 'llm_stream_end') {
-            if (!settled) { settled = true; clearTimeout(timeout); ws.close(); resolve(fullText); }
-          } else if (msg.type === 'error') {
-            if (!settled) { settled = true; clearTimeout(timeout); ws.close(); reject(new Error(msg.payload?.message || 'LLM error')); }
-          }
+          if (msg.type === 'llm_stream_chunk' && msg.payload?.text) { fullText += msg.payload.text; }
+          else if (msg.type === 'llm_stream_end') { if (!settled) { settled = true; clearTimeout(timeout); ws.close(); resolve(fullText); } }
+          else if (msg.type === 'error') { if (!settled) { settled = true; clearTimeout(timeout); ws.close(); reject(new Error(msg.payload?.message || 'LLM error')); } }
         } catch (_) {}
       });
-
       ws.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timeout); reject(err); } });
       ws.on('close', () => { if (!settled) { settled = true; clearTimeout(timeout); resolve(fullText || ''); } });
     });
   }
 
-  /**
-   * LLM query that resolves early at the first sentence boundary.
-   * Returns { firstSentence, fullText } — firstSentence is available as soon
-   * as the LLM streams a '.', '?', or '!' so TTS can start immediately.
-   * fullText is the complete response (needed for trigger classification).
-   *
-   * @param {string} text
-   * @param {string|null} systemPrompt
-   * @returns {Promise<{ firstSentence: string, fullText: string }>}
-   */
-  _directLLMQueryEarly(text, systemPrompt = null) {
+  _directLLMQueryEarlyViaWS(text, systemPrompt = null) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(STATEGRAPH_WS_URL, {
         headers: STATEGRAPH_API_KEY ? { Authorization: `Bearer ${STATEGRAPH_API_KEY}` } : {},
       });
-
       const requestId = `voice_fast_early_${Date.now()}`;
       let fullText = '';
       let firstSentence = '';
       let earlyResolved = false;
       let settled = false;
-
-      const SENTENCE_END = /[.?!]/;
-
       const checkEarlyResolve = () => {
         if (earlyResolved) return;
         const match = fullText.match(/^[^.?!]*[.?!]/);
-        if (match && match[0].trim().length > 4) {
-          firstSentence = match[0].trim();
-          earlyResolved = true;
-        }
+        if (match && match[0].trim().length > 4) { firstSentence = match[0].trim(); earlyResolved = true; }
       };
-
       const timeout = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          ws.close();
-          const fs = firstSentence || fullText || 'Forgive the delay — no answer came in time.';
-          resolve({ firstSentence: fs, fullText: fullText || fs });
-        }
+        if (!settled) { settled = true; ws.close(); const fs = firstSentence || fullText || 'Forgive the delay — no answer came in time.'; resolve({ firstSentence: fs, fullText: fullText || fs }); }
       }, 15000);
-
       ws.on('open', () => {
         ws.send(JSON.stringify({
-          id: requestId,
-          type: 'llm_request',
-          payload: {
-            prompt: text,
-            provider: 'openai',
-            options: {
-              maxTokens: 80,
-              temperature: 0.7,
-              taskType: 'conversation',
-              responseLength: 'short',
-              model: 'gpt-4o-mini',
-              stream: true,
-            },
-            context: { systemInstructions: systemPrompt || '' },
-          },
-          timestamp: Date.now(),
-          metadata: { source: 'voice_fast_lane' },
+          id: requestId, type: 'llm_request',
+          payload: { prompt: text, provider: 'openai', options: { maxTokens: 100, temperature: 0.7, model: 'gpt-4o-mini', stream: true }, context: { systemInstructions: systemPrompt || '' } },
+          timestamp: Date.now(), metadata: { source: 'voice_fast_lane' },
         }));
       });
-
       ws.on('message', (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.type === 'llm_stream_chunk' && msg.payload?.text) {
-            fullText += msg.payload.text;
-            checkEarlyResolve();
-          } else if (msg.type === 'llm_stream_end') {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timeout);
-              ws.close();
-              const fs = firstSentence || fullText.trim();
-              resolve({ firstSentence: fs, fullText: fullText.trim() });
-            }
-          } else if (msg.type === 'error') {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timeout);
-              ws.close();
-              reject(new Error(msg.payload?.message || 'LLM error'));
-            }
-          }
+          if (msg.type === 'llm_stream_chunk' && msg.payload?.text) { fullText += msg.payload.text; checkEarlyResolve(); }
+          else if (msg.type === 'llm_stream_end') { if (!settled) { settled = true; clearTimeout(timeout); ws.close(); const fs = firstSentence || fullText.trim(); resolve({ firstSentence: fs, fullText: fullText.trim() }); } }
+          else if (msg.type === 'error') { if (!settled) { settled = true; clearTimeout(timeout); ws.close(); reject(new Error(msg.payload?.message || 'LLM error')); } }
         } catch (_) {}
       });
-
       ws.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timeout); reject(err); } });
-      ws.on('close', () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
-          const fs = firstSentence || fullText || '';
-          resolve({ firstSentence: fs, fullText: fullText || fs });
-        }
-      });
+      ws.on('close', () => { if (!settled) { settled = true; clearTimeout(timeout); const fs = firstSentence || fullText || ''; resolve({ firstSentence: fs, fullText: fullText || fs }); } });
     });
   }
 
@@ -1106,7 +1324,7 @@ class VoiceServiceMCPServer {
             // Synthesize TTS for the stategraph result (EVI already spoke holding phrase)
             // For EVI mode we use the standard TTS for the result notification,
             // since EVI's session is already closed by then.
-            const ttsResult = await tts.synthesize({ text: sgResult.text, language: 'en' }).catch(() => null);
+            const ttsResult = await voiceProvider.synthesize({ text: sgResult.text, language: 'en' }).catch(() => null);
             if (!ttsResult) return;
             const http_module = require('http');
             const payload = JSON.stringify({

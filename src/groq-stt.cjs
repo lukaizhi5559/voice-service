@@ -13,7 +13,8 @@ const os = require('os');
 const logger = require('./logger.cjs');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = process.env.GROQ_STT_MODEL || 'whisper-large-v3-turbo';
+const GROQ_MODEL      = process.env.GROQ_STT_MODEL      || 'whisper-large-v3-turbo';
+const GROQ_MODEL_AUTO = process.env.GROQ_STT_MODEL_AUTO || 'whisper-large-v3';
 
 /**
  * Transcribe audio buffer using Groq Whisper.
@@ -33,40 +34,50 @@ async function transcribe({ audioBuffer, format = 'wav', languageHint = null }) 
   const tmpFile = path.join(os.tmpdir(), `thinkdrop-groq-stt-${Date.now()}.${format}`);
   fs.writeFileSync(tmpFile, audioBuffer);
 
+  const hasHintForLog = !!(languageHint && languageHint !== 'en');
+  const modelForLog = hasHintForLog ? GROQ_MODEL : GROQ_MODEL_AUTO;
   logger.info('[STT] Sending audio to Groq Whisper', {
     bytes: audioBuffer.length,
     format,
-    model: GROQ_MODEL,
-    languageHint: languageHint || 'auto',
+    model: modelForLog,
+    languageHint: languageHint || 'auto-detect',
   });
 
   try {
     // Language-appropriate decoder seed prompts — biases Whisper output toward the correct script.
     // Short words only: long sentences leak into output on silent audio.
     const LANG_PROMPTS = {
-      zh: '好的，搜索，打开，',
-      ja: 'はい、検索、開く、',
-      ko: '네, 검색, 열기,',
-      ar: 'حسنًا، بحث، افتح،',
-      ru: 'хорошо, поиск, открыть,',
-      hi: 'ठीक है, खोजें, खोलें,',
+      zh: '好的，搜索，打开，Claude，Perplexity，Google，ChatGPT，YouTube，',
+      ja: 'はい、検索、開く、Claude、Perplexity、Google、',
+      ko: '네, 검색, 열기, Claude, Perplexity, Google,',
+      ar: 'حسنًا، بحث، افتح، Claude، Perplexity، Google،',
+      ru: 'хорошо, поиск, открыть, Claude, Perplexity, Google,',
+      hi: 'ठीक है, खोजें, खोलें, Claude, Perplexity, Google,',
     };
-    const effectiveLang = languageHint || 'en';
-    const decoderPrompt = LANG_PROMPTS[effectiveLang] || 'okay, search, open, scroll, hey,';
+
+    // When no hint is given, use large-v3 for auto-detection — it has better multilingual
+    // accuracy than turbo (especially for CJK detection and language identification).
+    // When a language hint IS given, turbo is fast enough and we lock the decoder.
+    // Never pass language='en' explicitly — that disables multilingual detection.
+    const hasHint = !!(languageHint && languageHint !== 'en');
+    const selectedModel = hasHint ? GROQ_MODEL : GROQ_MODEL_AUTO;
+    const decoderPrompt = hasHint ? (LANG_PROMPTS[languageHint] || 'okay, search, open, scroll, hey,') : 'okay, search, open, scroll, hey,';
 
     const params = {
       file: fs.createReadStream(tmpFile),
-      model: GROQ_MODEL,
+      model: selectedModel,
       response_format: 'json',
       temperature: 0.0,
-      language: effectiveLang,
       prompt: decoderPrompt,
+      // Only lock to a language when explicitly hinted — omit for auto-detection
+      ...(hasHint ? { language: languageHint } : {}),
     };
 
     const transcription = await groq.audio.transcriptions.create(params);
 
     const text = (transcription.text || '').trim();
-    const language = transcription.language || languageHint || 'en';
+    // Trust Groq's detected language — do not fall back to 'en' as that masks auto-detection.
+    const language = transcription.language || languageHint || 'und';
 
     logger.info('[STT] Groq transcription complete', {
       language,

@@ -87,8 +87,19 @@ function _intensityToExaggeration(intensity) {
  * @param {{ text: string, language?: string, voiceId?: string, exaggeration?: number }} args
  * @returns {Promise<{ audioBuffer: Buffer, format: string, durationEstimateMs: number }>}
  */
+// Languages Resemble Chatterbox supports natively.
+// All others fall through to Cartesia (multilingual) in the provider chain.
+const RESEMBLE_SUPPORTED_LANGS = new Set(['en', 'en-us', 'en-gb', 'en-au']);
+
 async function synthesize({ text, language = 'en', voiceId, exaggeration } = {}) {
   if (!isAvailable()) throw new Error('Resemble AI not configured (missing RESEMBLE_API_KEY or RESEMBLE_VOICE_UUID)');
+
+  // Skip Resemble for non-English — Chatterbox produces garbled output for CJK/Arabic/Cyrillic.
+  // voice-provider.cjs will fall through to Cartesia which handles zh/es/ru/ja/ko natively.
+  const langBase = (language || 'en').toLowerCase().split('-')[0];
+  if (!RESEMBLE_SUPPORTED_LANGS.has(langBase) && langBase !== 'en') {
+    throw new Error(`Resemble Chatterbox does not support language: ${language} — use Cartesia for multilingual TTS`);
+  }
 
   const voice = _resolveVoice(language, voiceId);
 
