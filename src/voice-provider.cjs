@@ -49,6 +49,39 @@ const PROVIDER_MAP = {
   macos:      macosNative,
 };
 
+// ── Circuit breaker state ───────────────────────────────────────────────────
+// Track consecutive TTS failures per provider so we skip flaky providers
+// instead of wasting ~800ms on each doomed attempt.
+const _ttsFailures = {}; // name -> { count, lastFailAt }
+const CIRCUIT_BREAKER_THRESHOLD = 2;  // consecutive failures before tripping
+const CIRCUIT_BREAKER_RESET_MS  = 60_000; // retry after 60s
+
+function _isTTSCircuitOpen(name) {
+  const rec = _ttsFailures[name];
+  if (!rec) return false;
+  if (rec.count < CIRCUIT_BREAKER_THRESHOLD) return false;
+  // Auto-reset after cooldown
+  if (Date.now() - rec.lastFailAt > CIRCUIT_BREAKER_RESET_MS) {
+    delete _ttsFailures[name];
+    return false;
+  }
+  return true;
+}
+
+function _recordTTSFailure(name) {
+  const rec = _ttsFailures[name] || { count: 0, lastFailAt: 0 };
+  rec.count += 1;
+  rec.lastFailAt = Date.now();
+  _ttsFailures[name] = rec;
+  if (rec.count >= CIRCUIT_BREAKER_THRESHOLD) {
+    logger.warn(`[VoiceProvider] Circuit breaker OPEN for TTS provider: ${name} (${rec.count} consecutive failures — skipping for ${CIRCUIT_BREAKER_RESET_MS / 1000}s)`);
+  }
+}
+
+function _recordTTSSuccess(name) {
+  if (_ttsFailures[name]) delete _ttsFailures[name];
+}
+
 // ── Active provider selection ─────────────────────────────────────────────────
 
 let _activeProviderName = null;
@@ -181,10 +214,17 @@ async function synthesize(args) {
   let lastError;
   for (const { name, provider } of chain) {
     if (!provider.synthesize) continue;
+    if (_isTTSCircuitOpen(name)) {
+      logger.info(`[VoiceProvider] TTS circuit open for ${name} — skipping`);
+      continue;
+    }
     try {
       logger.info(`[VoiceProvider] TTS via ${name}`);
-      return await provider.synthesize(args);
+      const result = await provider.synthesize(args);
+      _recordTTSSuccess(name);
+      return result;
     } catch (err) {
+      _recordTTSFailure(name);
       logger.warn(`[VoiceProvider] TTS failed on ${name} — trying next`, { error: err.message });
       lastError = err;
     }

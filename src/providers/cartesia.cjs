@@ -64,7 +64,9 @@ async function synthesize({ text, language = 'en', voiceId }) {
     model_id: CARTESIA_MODEL_ID,
     transcript: text,
     voice: { mode: 'id', id: voice },
-    output_format: { container: 'mp3', encoding: 'mp3', sample_rate: 44100 },
+    // wav/pcm_s16le at 22050Hz: no encoder overhead on Cartesia's side (faster synthesis),
+    // native Chromium decode (no MP3 decoder needed), smaller IPC payload than mp3/44100.
+    output_format: { container: 'wav', encoding: 'pcm_s16le', sample_rate: 22050 },
     language: lang,
   }, {
     headers: {
@@ -79,7 +81,7 @@ async function synthesize({ text, language = 'en', voiceId }) {
   const audioBuffer = Buffer.from(response.data);
   const durationEstimateMs = Math.ceil((text.length / 15) * 1000);
   logger.info('[CartesiaProvider] audio generated', { bytes: audioBuffer.length, durationEstimateMs });
-  return { audioBuffer, format: 'mp3', durationEstimateMs };
+  return { audioBuffer, format: 'wav', durationEstimateMs };
 }
 
 module.exports = { isAvailable, transcribe, synthesize };

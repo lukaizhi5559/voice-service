@@ -2,8 +2,9 @@
  * STT — Speech-to-text orchestrator.
  *
  * Provider priority:
- *   1. Groq Whisper (groq-stt.cjs) — primary, free tier, fast
- *   2. ElevenLabs Scribe            — fallback
+ *   1. Deepgram Nova-2 (deepgram-stt.cjs) — primary; keyword boosting for "Armis"/"ThinkDrop"
+ *   2. Groq Whisper    (groq-stt.cjs)     — fallback if DEEPGRAM_API_KEY not set
+ *   3. ElevenLabs Scribe                  — last resort
  */
 
 'use strict';
@@ -14,6 +15,7 @@ const os = require('os');
 const FormData = require('form-data');
 const axios = require('axios');
 const logger = require('./logger.cjs');
+const deepgramStt = require('./deepgram-stt.cjs');
 const groqStt = require('./groq-stt.cjs');
 
 // ── ElevenLabs Scribe (fallback) ──────────────────────────────────────────────
@@ -43,7 +45,16 @@ async function transcribeAudio({ audio, format = 'wav', languageHint = null }) {
     throw new Error('[STT] audio must be a Buffer, Uint8Array, or file path string');
   }
 
-  // ── 1. Try Groq Whisper ───────────────────────────────────────────────────
+  // ── 1. Try Deepgram Nova-2 (keyword boosting for Armis/ThinkDrop) ──────────
+  if (deepgramStt.isAvailable()) {
+    try {
+      return await deepgramStt.transcribe({ audioBuffer, format, languageHint });
+    } catch (err) {
+      logger.warn('[STT] Deepgram failed, falling back to Groq Whisper', { error: err.message });
+    }
+  }
+
+  // ── 2. Try Groq Whisper ───────────────────────────────────────────────────
   if (groqStt.isAvailable()) {
     try {
       return await groqStt.transcribe({ audioBuffer, format, languageHint });

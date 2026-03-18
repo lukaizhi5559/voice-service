@@ -1,0 +1,11 @@
+AA1 R M IH0 S @armis
+AE1 R M IH0 S @armis_ae
+AA1 R M AH0 S @armus
+AE1 R M AH0 S @armus_ae
+HH EY1 AA1 R M IH0 S @hey_armis
+HH AY1 AA1 R M IH0 S @hi_armis
+OW0 K EY1 AA1 R M IH0 S @ok_armis
+h āi AA1 R M IH0 S @hai_armis
+TH IH1 NG K D R AA1 P @think_drop
+HH EY1 TH IH1 NG K D R AA1 P @hey_think_drop
+OW0 K EY1 TH IH1 NG K D R AA1 P @ok_think_drop

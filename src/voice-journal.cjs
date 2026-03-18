@@ -39,6 +39,8 @@
  *     lastSpokenAt: ISO string,
  *     activationMode: 'push-to-talk' | 'wake-word' | 'continuous',
  *     detectedLanguage: string,
+ *     wakeSessionActivatedAt: ISO string | null,  // set when wake word fires, cleared after TTL
+ *     sessionLanguage: 'en',
  *   }
  * }
  */
@@ -111,9 +113,16 @@ function write(state) {
     _ensureDir();
     const tmp = JOURNAL_PATH + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    // Re-ensure dir immediately before rename — prevents ENOENT if dir was
+    // removed between the writeFileSync and renameSync (race condition on macOS).
+    _ensureDir();
     fs.renameSync(tmp, JOURNAL_PATH);
   } catch (err) {
     logger.error('[Journal] Write failed', { error: err.message });
+    // Last-resort: try direct write without atomic rename
+    try {
+      fs.writeFileSync(JOURNAL_PATH, JSON.stringify(state, null, 2), 'utf8');
+    } catch (_) {}
   }
 }
 
@@ -270,13 +279,59 @@ function setVoiceStatus(status, extra = {}) {
  * This is the single source of truth for response language across all lanes.
  * answer.js reads this directly from the journal file.
  */
+/** Active session window TTL in milliseconds (30 seconds). */
+const WAKE_SESSION_TTL_MS = 30_000;
+
+/**
+ * Mark the wake word as just detected (or refresh an active session).
+ * Opens/extends a 30-second active session window during which subsequent
+ * utterances bypass the wake-word check.
+ */
+function setWakeSession() {
+  const state = read();
+  patch({ voice: { ...state.voice, wakeSessionActivatedAt: new Date().toISOString() } });
+  logger.info('[Journal] Wake session opened/refreshed (30s window)');
+}
+
+/**
+ * Returns true if a wake session is currently active (within 30s TTL).
+ */
+function isWakeSessionActive() {
+  const state = read();
+  const activatedAt = state.voice?.wakeSessionActivatedAt;
+  if (!activatedAt) return false;
+  const age = Date.now() - new Date(activatedAt).getTime();
+  return age < WAKE_SESSION_TTL_MS;
+}
+
+/**
+ * Returns true if there has been any wake session activity in the last 5 minutes.
+ * Used for CJK-only utterances where the user cannot embed a Latin wake word —
+ * if they were recently talking to the assistant, keep them in session.
+ */
+function isRecentlyActive() {
+  const state = read();
+  const activatedAt = state.voice?.wakeSessionActivatedAt;
+  if (!activatedAt) return false;
+  const age = Date.now() - new Date(activatedAt).getTime();
+  return age < 5 * 60 * 1000; // 5 minutes
+}
+
 function setSessionLanguage(lang) {
-  if (!lang || lang === (read().voice?.sessionLanguage)) return;
+  if (!lang || lang === (read().voice?.sessionLanguage)) {
+    // Even if language unchanged, refresh the activity timestamp
+    if (lang && lang !== 'en') {
+      const state = read();
+      patch({ voice: { ...state.voice, lastLanguageActivityAt: new Date().toISOString() } });
+    }
+    return;
+  }
   const state = read();
   patch({
     voice: {
       ...state.voice,
       sessionLanguage: lang,
+      lastLanguageActivityAt: new Date().toISOString(),
     },
   });
   logger.info('[Journal] sessionLanguage updated', { lang });
@@ -353,6 +408,9 @@ module.exports = {
   acknowledgeSignal,
   setVoiceStatus,
   setSessionLanguage,
+  setWakeSession,
+  isWakeSessionActive,
+  isRecentlyActive,
   getStatusSummary,
   watch,
   JOURNAL_PATH,

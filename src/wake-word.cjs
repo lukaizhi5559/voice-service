@@ -27,32 +27,47 @@ const DEFAULT_WAKE_PHRASES = [
   // --- Core & Formal ---
   'armis', 'hey armis', 'hi armis', 'ok armis', 'okay armis', 'hello armis', 
   'dear armis', 'armis assistant', 'armis system', 'armis help',
-
   // --- Phonetic & Slurred Variations ---
   // Accounts for misheard vowels or dropped consonants in noisy rooms
   'armiss', 'armous', 'armas', 'armus', 'armies', 'ormis', 'ormus', 'ormies',
   'harmis', 'harness', 'promise', 'armistice', 'amis', 'armless', 'armish',
   'almis', 'ar-miss', 'are miss', 'arm-us',
-
   // --- Natural Language & Urgent Triggers ---
   // Phrases users naturally say when they forget the exact name
   'you awake', 'are you there', 'wake up', 'listen up', 'hey assistant', 
   'i need you', 'start listening', 'activate armis', 'system wake', 
   'excuse me armis', 'pardon me armis', 'can you hear me', 'are you listening',
   'armis you there', 'i have a question', 'help me out', 'can you help',
-
   // --- Multi-Syllable "Compound" Triggers ---
   // 3-4 syllable phrases are the industry "sweet spot" for accuracy
   'hey there armis', 'yo armis', 'listen armis', 'ready armis', 'go armis',
   'hey armis assistant', 'ok armis assistant', 'please help armis',
 
-  // --- Catch-all / "Computer" Styles ---
-  // Standard triggers used by major competitors like 
-  'hey computer', 'yo computer', 'listen computer', 'ready computer', 'go computer',
-  'hey computer assistant', 'ok computer assistant', 'please help computer',
+  // --- Armis phonetic variations ---
+  'armiss', 'armous', 'armas', 'armus', 'armies', 'ormis', 'ormus', 'ormies',
+  'harmis', 'almis', 'arm-us', 'are miss', 'armish', 'armless',
 
-  // Amazon and Home Assistant
-  'computer', 'assistant', 'smart assistant', 'hey machine', 'hey bot', 'armis bot'
+  // --- Core ThinkDrop phrases ---
+  'thinkdrop', 'think drop',
+  'hey thinkdrop', 'hey think drop',
+  'hi thinkdrop', 'hi think drop',
+  'ok thinkdrop', 'okay thinkdrop',
+  'ok think drop', 'okay think drop',
+  'yo thinkdrop', 'yo think drop',
+
+  // --- ThinkDrop phonetic variations (Whisper commonly mishears the compound word) ---
+  // Observed real transcriptions: 'Tinkdrop', 'Thinktrap', 'Tinkdrab', 'Thinkdrop'
+  'tinkdrop', 'tinkdrab', 'thinktrop', 'thinkdrap', 'thinktrip',
+  'thinked drop', 'thing drop', 'think trap', 'think drip',
+  'think job', 'sink drop', 'stink drop', 'think drug',
+  'thin drop', 'tink drop', 'fink drop', 'drink drop',
+
+  // --- ThinkDrop natural address patterns ---
+  'hey thinkdrop assistant',
+  'thinkdrop you there', 'thinkdrop are you there',
+  'thinkdrop listen', 'thinkdrop help',
+  'thinkdrop wake up', 'wake up thinkdrop',
+  'listen thinkdrop', 'thinkdrop i need you',
 ];
 
 const DEFAULT_CANCEL_PHRASES = [
@@ -76,6 +91,14 @@ const DEFAULT_CANCEL_PHRASES = [
   'armis forget it',
   'stop armis',
   'cancel armis',
+  'thinkdrop stop',
+  'thinkdrop cancel',
+  'thinkdrop cancel that',
+  'thinkdrop abort',
+  'thinkdrop never mind',
+  'thinkdrop forget it',
+  'stop thinkdrop',
+  'cancel thinkdrop',
 ];
 
 const DEFAULT_STATUS_PHRASES = [
@@ -105,7 +128,10 @@ function _getWakePhrases() {
 }
 
 function _getSensitivity() {
-  const val = parseFloat(process.env.WAKE_WORD_SENSITIVITY || '0.4');
+  // Default 0.35 — balanced for mixed-language (CJK + Latin) transcripts where
+  // Whisper mangles the wake word. Lower values miss real activations.
+  // Decrease via WAKE_WORD_SENSITIVITY env var if false positives return.
+  const val = parseFloat(process.env.WAKE_WORD_SENSITIVITY || '0.35');
   return Math.min(Math.max(val, 0), 1);
 }
 
@@ -143,6 +169,34 @@ function _ensureInitialized() {
  * @param {string} transcript - Raw text from STT
  * @returns {{ detected: boolean, matchedPhrase: string|null, score: number, type: 'wake'|'cancel'|'status'|null }}
  */
+// Fast regex covering all known Whisper mishears of ThinkDrop and Armis.
+// Runs BEFORE Fuse — Fuse struggles with mixed CJK+Latin text because the
+// surrounding Chinese characters inflate the string distance scores.
+// Whisper-observed hallucinations of "Armis" (from actual production logs, March 2026):
+//   "Armis" → "harvest"         (phoneme cluster /ɑːrmɪs/ → /hɑːrvɪst/)
+//   "Armis" → "I promise"       (/ɑːrmɪs/ → /praɪˈmɪs/)
+//   "Armis" → "Permiss"         (/ɑːrmɪs/ → /pɜːrmɪs/)
+//   "Armis" → "harmiss"         (aspirated h + rest)
+// These are added as standalone-word patterns so normal use of "harvest" / "promise"
+// in real sentences does NOT trigger the wake word.
+// NOTE: "harvest" and "promise" are dangerous — they appear in real sentences.
+// We only match them when they appear WITHOUT surrounding content (i.e., the
+// whole transcript IS "harvest" or "harvest do you tell" with nothing semantic before).
+// Better: match when transcript starts with these words (wake intent structure).
+const WAKE_REGEX = /\b(think\s*drop|tinkdrop|tinkdrab|thinktrop|thinkdrap|thinktrip|thinktrap|thinkidrop|thinky\s*drop|thing\s*drop|think\s*trap|sink\s*drop|stink\s*drop|thin\s*drop|tink\s*drop|armis|armus|armys|armas|armiss|armies|ormis|ormus|harmis|harmiss|permiss|arm\s*us|arm\s*is|hermes|hermis|harris|harmes|jarvis|artemis|armpits)\b/i;
+
+// Secondary regex: known Whisper hallucinations that are also common English words.
+// Only fire when the transcript is SHORT (≤6 words) AND starts with these — indicating
+// the user said only the wake word (possibly with filler words after).
+// "harvest, do you tell, huh?" → 5 words, starts with "harvest" → match
+// "I promise" → starts with "i promise", 2 words → match (i = filler Whisper adds)
+// "Sure, I promise to send you the file" → long sentence, no match
+const WAKE_REGEX_HALLUCINATION = /^(harvest|i\s+promise|promise)\b/i;
+function _isHallucinatedWakeWord(text) {
+  const wordCount = text.trim().split(/\s+/).length;
+  return wordCount <= 7 && WAKE_REGEX_HALLUCINATION.test(text.trim());
+}
+
 function detect(transcript) {
   _ensureInitialized();
 
@@ -151,6 +205,22 @@ function detect(transcript) {
   }
 
   const text = transcript.toLowerCase().trim();
+
+  // ── Fast regex pass (handles mixed CJK+Latin — Fuse alone is unreliable here) ──
+  const regexMatch = WAKE_REGEX.exec(text);
+  if (regexMatch) {
+    logger.info('[WakeWord] Wake word detected (regex)', { transcript: text.substring(0, 60), matched: regexMatch[0] });
+    return { detected: true, matchedPhrase: regexMatch[0], score: 1.0, type: 'wake' };
+  }
+
+  // ── Hallucination pass: known Whisper mis-transcriptions of "Armis" ──────────
+  // "harvest, do you tell, huh?" / "I promise" / "I promise, they think..." —
+  // these are all short transcripts where Whisper heard "Armis" but output a
+  // phonetically similar common English word. Gated on short utterance length.
+  if (_isHallucinatedWakeWord(text)) {
+    logger.info('[WakeWord] Wake word detected (hallucination pattern)', { transcript: text.substring(0, 60) });
+    return { detected: true, matchedPhrase: 'armis', score: 0.9, type: 'wake' };
+  }
 
   const wakeResult = _checkFuse(_wakeFuse, text);
   if (wakeResult.detected) {

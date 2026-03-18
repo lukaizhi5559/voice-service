@@ -61,7 +61,7 @@ function route(englishText) {
   //   3. Clear imperative commands with ≥3 words
   // Everything else is silently dropped with reason 'sg_noise_suppressed'.
   if (isRunning) {
-    const WAKE_PHRASE_RE = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|listen\s*up|wake\s*up|i\s*need\s*you|are\s*you\s*there)\b/i;
+    const WAKE_PHRASE_RE = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think)\b/i;
     const EXPLICIT_COMMAND_RE = /^(stop|cancel|abort|pause|resume|nevermind|never mind|forget it|actually|wait|hold on)\b/i;
     const wordCount = text.split(/\s+/).filter(Boolean).length;
     const hasWake = WAKE_PHRASE_RE.test(text);

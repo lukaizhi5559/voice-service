@@ -6,8 +6,10 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.cjs",
+    "predev": "node scripts/download-kws-model.js",
     "dev": "nodemon --ignore data/ --ignore tmp/ --ignore logs/ src/server.cjs",
-    "test": "node tests/test-service.cjs"
+    "test": "node tests/test-service.cjs",
+    "setup:kws": "node scripts/download-kws-model.js"
   },
   "nodemonConfig": {
     "ignore": [
@@ -37,6 +39,7 @@
     "fuse.js": "^7.0.0",
     "groq-sdk": "^0.37.0",
     "node-record-lpcm16": "^1.0.1",
+    "sherpa-onnx-node": "^1.12.29",
     "winston": "^3.11.0",
     "ws": "^8.16.0"
   },
@@ -45,5 +48,9 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "resolutions": {
+    "sherpa-onnx-win-x64": "1.12.28",
+    "sherpa-onnx-win-ia32": "1.12.28"
   }
 }

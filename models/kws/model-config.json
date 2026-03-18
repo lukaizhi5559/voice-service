@@ -1,0 +1,12 @@
+{
+  "model": "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+  "languages": ["zh", "en"],
+  "downloadedAt": "2026-03-18T00:00:00.000Z",
+  "files": {
+    "encoder": "zh-en/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+    "decoder": "zh-en/decoder-epoch-13-avg-2-chunk-16-left-64.onnx",
+    "joiner": "zh-en/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+    "tokens": "zh-en/tokens.txt",
+    "keywords": "keywords.txt"
+  }
+}

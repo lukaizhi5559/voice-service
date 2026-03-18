@@ -5,3 +5,6 @@ logs/
 tmp/
 data/
 .yarn
+# KWS model files — large ONNX binaries, download via: npm run setup:kws
+models/kws/*.onnx
+models/kws/tokens.txt

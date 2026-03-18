@@ -88,6 +88,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@npmcli/redact@npm:^4.0.0":
+  version: 4.0.0
+  resolution: "@npmcli/redact@npm:4.0.0"
+  checksum: 4e029c44a8593304bb1aa5a8f1559cb8f37b4dc3880c589ce546da0b8cfa741d16a054db38ee309e81c2120c148ba33edbb3252f97a78b3234ba9ab3fa3e176c
+  languageName: node
+  linkType: hard
+
 "@protobufjs/aspromise@npm:^1.1.1, @protobufjs/aspromise@npm:^1.1.2":
   version: 1.1.2
   resolution: "@protobufjs/aspromise@npm:1.1.2"
@@ -188,21 +195,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/node@npm:*":
-  version: 25.3.2
-  resolution: "@types/node@npm:25.3.2"
+"@types/node@npm:*, @types/node@npm:>=13.7.0":
+  version: 25.5.0
+  resolution: "@types/node@npm:25.5.0"
   dependencies:
     undici-types: ~7.18.0
-  checksum: 6375c36cfc40ea512dfc715ce7ef55794ded163a4797a459bf2e2d7ac9c78a1ea79c2482bcdce7a94bb999fce8a28ab7a5ef568ea5d5586bf831f0a44a80f831
-  languageName: node
-  linkType: hard
-
-"@types/node@npm:>=13.7.0":
-  version: 25.3.0
-  resolution: "@types/node@npm:25.3.0"
-  dependencies:
-    undici-types: ~7.18.0
-  checksum: 3c2a05f53043fc9d33e6e7b2e09399600e25818362c1e72f15ad542c30f1759cbf721b95ffa6db78a12785bd5431ed1ad57c1a98509832785511f8b648f87add
+  checksum: ea0908794d5c011f4f2b5d2e93737ae047ff4a9fd1ec6da27e13a1f976d8d0e029830ddf2d4177e00a2601307e8bbc06e7b4cb3e29e889489d42dd44b49c796a
   languageName: node
   linkType: hard
 
@@ -308,13 +306,13 @@ __metadata:
   linkType: hard
 
 "axios@npm:^1.6.0":
-  version: 1.13.5
-  resolution: "axios@npm:1.13.5"
+  version: 1.13.6
+  resolution: "axios@npm:1.13.6"
   dependencies:
     follow-redirects: ^1.15.11
     form-data: ^4.0.5
     proxy-from-env: ^1.1.0
-  checksum: 985024c4a32f837053f198f02a308fd6f8bfb4053a2f21e39e37992bc6d06917f008679c36b3e7f0f0c9060c85ffe37c61e58d2ac662595d68dc1b89cef78de8
+  checksum: 72e94640e34aa9b591a47a9cc1798a1e18f179e15e39276514dd73f6d910981bdb2117c649da858bd72fc34d91db4f84318f88c8d306e395cd4ef5d6f142ab70
   languageName: node
   linkType: hard
 
@@ -349,7 +347,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bare-fs@npm:^4.0.1":
+"bare-fs@npm:^4.0.1, bare-fs@npm:^4.5.5":
   version: 4.5.5
   resolution: "bare-fs@npm:4.5.5"
   dependencies:
@@ -368,9 +366,9 @@ __metadata:
   linkType: hard
 
 "bare-os@npm:^3.0.1":
-  version: 3.7.0
-  resolution: "bare-os@npm:3.7.0"
-  checksum: d770682f46b7b1e19db266b99083d8eeca7a8366850fe48a974130ebf665d25dbaefb10ccc56332f95353f5e3544e40cd771e18ed7568ec83bf175aad3271091
+  version: 3.8.0
+  resolution: "bare-os@npm:3.8.0"
+  checksum: 2ef48ea27d6af5f2c463f307721a38904d07d443449589b426d31b793e9b7680b75788df1318b9130abc9de035557e09640a47861876ea1f9786e455e5937e35
   languageName: node
   linkType: hard
 
@@ -384,8 +382,8 @@ __metadata:
   linkType: hard
 
 "bare-stream@npm:^2.6.4":
-  version: 2.8.0
-  resolution: "bare-stream@npm:2.8.0"
+  version: 2.8.1
+  resolution: "bare-stream@npm:2.8.1"
   dependencies:
     streamx: ^2.21.0
     teex: ^1.0.1
@@ -397,7 +395,7 @@ __metadata:
       optional: true
     bare-events:
       optional: true
-  checksum: 32d92d59f5de5dec3466ff9c380bf9e44f316c75fb7423e60ea37b5d941fdacf22f0c2e8b548a5e0169500be9a49f76bbcfb12ac89c966aa184bc9861ebda44a
+  checksum: bdf4c6905a04313de3a0aa986326ecca3e77c134f917122c43ecd6c4aaaccc64cb30f9b9efd8e59413d5f0d7f0857bd3b8f6a421f9f029f8069f8c73c54e3232
   languageName: node
   linkType: hard
 
@@ -436,11 +434,11 @@ __metadata:
   linkType: hard
 
 "brace-expansion@npm:^5.0.2":
-  version: 5.0.3
-  resolution: "brace-expansion@npm:5.0.3"
+  version: 5.0.4
+  resolution: "brace-expansion@npm:5.0.4"
   dependencies:
     balanced-match: ^4.0.2
-  checksum: 8fea33ebbf4eac08d578fad7727c25c18a86e453bbd95d6312ecd87db73effe5607c77ed03d81ad7f56b4d84a4e355abbda939fdcab0d8a820bdb56d6587a7c5
+  checksum: ded86c0f0b138734110d67437fee52c1f97bc19175644788b1d71afec2d87d405cf05424ce428f88ae3abe8e09e13ee55f2675534b38076ef70e1e583ed75686
   languageName: node
   linkType: hard
 
@@ -1259,18 +1257,19 @@ __metadata:
   linkType: hard
 
 "lru-cache@npm:^11.0.0, lru-cache@npm:^11.1.0, lru-cache@npm:^11.2.1":
-  version: 11.2.6
-  resolution: "lru-cache@npm:11.2.6"
-  checksum: 26fe602c92a0cb7a8da9a85db162ddd810d84507d9c4ef8d95a785a805648f9579e1148aaeac260f6b6315197bcf27c1b7e60a0a066621d6e95b3587699a0c70
+  version: 11.2.7
+  resolution: "lru-cache@npm:11.2.7"
+  checksum: c4aba67de4a8566622eb1e99cc5f43c1f91129c941af7624d4bbd48f312525d4bf4ce808a414d658a6bc336f0163daa1098d3a3e736989ad65d3231f587fbc30
   languageName: node
   linkType: hard
 
 "make-fetch-happen@npm:^15.0.0":
-  version: 15.0.4
-  resolution: "make-fetch-happen@npm:15.0.4"
+  version: 15.0.5
+  resolution: "make-fetch-happen@npm:15.0.5"
   dependencies:
     "@gar/promise-retry": ^1.0.0
     "@npmcli/agent": ^4.0.0
+    "@npmcli/redact": ^4.0.0
     cacache: ^20.0.1
     http-cache-semantics: ^4.1.1
     minipass: ^7.0.2
@@ -1280,7 +1279,7 @@ __metadata:
     negotiator: ^1.0.0
     proc-log: ^6.0.0
     ssri: ^13.0.0
-  checksum: eb875e1fbdf58b4d6d7c6c2ee97a2521b407f85d1fb2c0e6bc2c2d9d13fa34c3198eff3512589dc26e8fb32684e4e52f3c9d844a704ac96b393559a88b5e57ca
+  checksum: e43195c1e98d37acb4358eb574e6b4a591cd46624cbb4800ab2988bd21a3e7b4a26f94b561af119637643b87144e2adf03808909fefa4f88122ee1b3af7e9400
   languageName: node
   linkType: hard
 
@@ -1315,11 +1314,11 @@ __metadata:
   linkType: hard
 
 "minimatch@npm:^10.2.1, minimatch@npm:^10.2.2":
-  version: 10.2.3
-  resolution: "minimatch@npm:10.2.3"
+  version: 10.2.4
+  resolution: "minimatch@npm:10.2.4"
   dependencies:
     brace-expansion: ^5.0.2
-  checksum: 896a87685c0d376e7679e99c37072f92eeb0df003d63cd422e8fc48ea727108d9f722531a0a8d23fe7d776faccaca424d5765e7af3b0c5e1dfb73fabcc60f612
+  checksum: 56dce6b04c6b30b500d81d7a29822c108b7d58c46696ec7332d04a2bd104a5cb69e5c7ce93e1783dc66d61400d831e6e226ca101ac23665aff32ca303619dc3d
   languageName: node
   linkType: hard
 
@@ -1442,11 +1441,11 @@ __metadata:
   linkType: hard
 
 "node-abi@npm:^3.3.0":
-  version: 3.87.0
-  resolution: "node-abi@npm:3.87.0"
+  version: 3.89.0
+  resolution: "node-abi@npm:3.89.0"
   dependencies:
     semver: ^7.3.5
-  checksum: ffe24d2e9e9fcf46c9aff7ddd93cbd5b128ce0a7a4032019ce2eeef3d5fad34cfc7f48650e3051fc87bb28621f6d2be166d0a19135ba80d39182897cb4bd29e1
+  checksum: 5e29c93999f31d367c2067a8d0711f7a6ffdbd606c73fc4b3efa3e4195f923c4d956b46ea16d9d2148e4c857fd22e649de122980a64c160ba59240f6a0880274
   languageName: node
   linkType: hard
 
@@ -1724,12 +1723,12 @@ __metadata:
   linkType: hard
 
 "pump@npm:^3.0.0":
-  version: 3.0.3
-  resolution: "pump@npm:3.0.3"
+  version: 3.0.4
+  resolution: "pump@npm:3.0.4"
   dependencies:
     end-of-stream: ^1.1.0
     once: ^1.3.1
-  checksum: 52843fc933b838c0330f588388115a1b28ef2a5ffa7774709b142e35431e8ab0c2edec90de3fa34ebb72d59fef854f151eea7dfc211b6dcf586b384556bd2f39
+  checksum: d043c3e710c56ffd280711e98a94e863ab334f79ea43cee0fb70e1349b2355ffd2ff287c7522e4c960a247699d5b7825f00fa090b85d6179c973be13f78a6c49
   languageName: node
   linkType: hard
 
@@ -1840,6 +1839,75 @@ __metadata:
     tar-fs: ^3.0.4
     tunnel-agent: ^0.6.0
   checksum: 0cca1d16b1920800c0e22d27bc6305f4c67c9ebe44f67daceb30bf645ae39e7fb7dfbd7f5d6cd9f9eebfddd87ac3f7e2695f4eb906d19b7a775286238e6a29fc
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-darwin-arm64@npm:^1.12.29":
+  version: 1.12.29
+  resolution: "sherpa-onnx-darwin-arm64@npm:1.12.29"
+  conditions: os=darwin & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-darwin-x64@npm:^1.12.29":
+  version: 1.12.29
+  resolution: "sherpa-onnx-darwin-x64@npm:1.12.29"
+  conditions: os=darwin & cpu=x64
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-linux-arm64@npm:^1.12.29":
+  version: 1.12.29
+  resolution: "sherpa-onnx-linux-arm64@npm:1.12.29"
+  conditions: os=linux & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-linux-x64@npm:^1.12.29":
+  version: 1.12.29
+  resolution: "sherpa-onnx-linux-x64@npm:1.12.29"
+  conditions: os=linux & cpu=x64
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-node@npm:^1.12.29":
+  version: 1.12.29
+  resolution: "sherpa-onnx-node@npm:1.12.29"
+  dependencies:
+    sherpa-onnx-darwin-arm64: ^1.12.29
+    sherpa-onnx-darwin-x64: ^1.12.29
+    sherpa-onnx-linux-arm64: ^1.12.29
+    sherpa-onnx-linux-x64: ^1.12.29
+    sherpa-onnx-win-ia32: ^1.12.29
+    sherpa-onnx-win-x64: ^1.12.29
+  dependenciesMeta:
+    sherpa-onnx-darwin-arm64:
+      optional: true
+    sherpa-onnx-darwin-x64:
+      optional: true
+    sherpa-onnx-linux-arm64:
+      optional: true
+    sherpa-onnx-linux-x64:
+      optional: true
+    sherpa-onnx-win-ia32:
+      optional: true
+    sherpa-onnx-win-x64:
+      optional: true
+  checksum: 4aa86f24e8e13aa7fbfcd890e1bdced0c4f709bbc9deb562b90cb8924633190582713cb01640b2252d740dbdd40477f1d1a731f67f0a59c09c8a89fa61a6aa4b
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-win-ia32@npm:1.12.28":
+  version: 1.12.28
+  resolution: "sherpa-onnx-win-ia32@npm:1.12.28"
+  conditions: os=win32 & cpu=ia32
+  languageName: node
+  linkType: hard
+
+"sherpa-onnx-win-x64@npm:1.12.28":
+  version: 1.12.28
+  resolution: "sherpa-onnx-win-x64@npm:1.12.28"
+  conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
 
@@ -2020,8 +2088,8 @@ __metadata:
   linkType: hard
 
 "tar-fs@npm:^3.0.4":
-  version: 3.1.1
-  resolution: "tar-fs@npm:3.1.1"
+  version: 3.1.2
+  resolution: "tar-fs@npm:3.1.2"
   dependencies:
     bare-fs: ^4.0.1
     bare-path: ^3.0.0
@@ -2032,7 +2100,7 @@ __metadata:
       optional: true
     bare-path:
       optional: true
-  checksum: eaae4c5410897e00bd03c44bcaf9bad43f793d1dd8fa2fe0ba808c809c8b169d6f40c093eab0ce20e12e9b6b8bf63f11438b2a6a8695c1dfc441fa71a5013896
+  checksum: 2c591863823bfe90b9a1fe75dd53a340d90621390873cc8c313a5d6755a986af42562eaa2d6c2e5fc557c76c1882f4566d653e46453d5b93d96a80217d6c9711
   languageName: node
   linkType: hard
 
@@ -2050,26 +2118,27 @@ __metadata:
   linkType: hard
 
 "tar-stream@npm:^3.1.5":
-  version: 3.1.7
-  resolution: "tar-stream@npm:3.1.7"
+  version: 3.1.8
+  resolution: "tar-stream@npm:3.1.8"
   dependencies:
     b4a: ^1.6.4
+    bare-fs: ^4.5.5
     fast-fifo: ^1.2.0
     streamx: ^2.15.0
-  checksum: 6393a6c19082b17b8dcc8e7fd349352bb29b4b8bfe1075912b91b01743ba6bb4298f5ff0b499a3bbaf82121830e96a1a59d4f21a43c0df339e54b01789cb8cc6
+  checksum: 2064263433bd2ab93cecc6048101f9a104fdc402d5e15571354fcbf93b8a91c72d94b11113d2292c8dc93e0f0a34c5b57ea39418fda61cb3aaa75a21f9faecfb
   languageName: node
   linkType: hard
 
 "tar@npm:^7.5.4":
-  version: 7.5.9
-  resolution: "tar@npm:7.5.9"
+  version: 7.5.11
+  resolution: "tar@npm:7.5.11"
   dependencies:
     "@isaacs/fs-minipass": ^4.0.0
     chownr: ^3.0.0
     minipass: ^7.1.2
     minizlib: ^3.1.0
     yallist: ^5.0.0
-  checksum: 26fbbdf536895814167d03e4883f80febb6520729169c54d0f29ee8a163557283862752493f0e5b60800a6f3608aac3250c41fac8e20a4f056ba4fa63f3dbad7
+  checksum: 7f6785a85dd571b88985e493ec86f692962cbfa7b4017961fddfd2241e0ff3bcd89ed347f4c02b5433aa22b30cca5566e8711543df054fda8fd12425f505378f
   languageName: node
   linkType: hard
 
@@ -2215,6 +2284,7 @@ __metadata:
     groq-sdk: ^0.37.0
     node-record-lpcm16: ^1.0.1
     nodemon: ^3.0.0
+    sherpa-onnx-node: ^1.12.29
     winston: ^3.11.0
     ws: ^8.16.0
   languageName: unknown

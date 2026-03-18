@@ -29,6 +29,7 @@ const stt = require('./stt.cjs');
 const voiceProvider = require('./voice-provider.cjs');
 const { toEnglish, fromEnglish, normalizeLanguage, LANGUAGE_NAMES } = require('./language-translate.cjs');
 const wakeWord = require('./wake-word.cjs');
+const kwsDetector = require('./kws-detector.cjs');
 const router = require('./voice-router.cjs');
 const { warmUp: classifierWarmUp, classifyFreshTask: _classifyFreshTask } = require('./voice-classifier.cjs');
 const { detectEmotion } = require('./audio-emotion.cjs');
@@ -333,8 +334,41 @@ class VoiceServiceMCPServer {
       return { success: true, skipped: true, reason: 'audio_too_short' };
     }
 
+    // ── KWS gate: audio-domain keyword spotting (sherpa-onnx) ─────────────────
+    // Run BEFORE Groq STT in wake-word mode. If sherpa-onnx can't find the wake
+    // word in the raw audio, skip Groq entirely — no transcription cost, and we
+    // avoid Whisper hallucinating "Armis" as "harvest" / "I promise" / "permiss".
+    //
+    // Three outcomes:
+    //   1. KWS available + keyword NOT detected → bail out immediately
+    //   2. KWS available + keyword detected     → set skipWakeWordCheck=true
+    //      (audio already confirmed wake word; skip redundant text-based check)
+    //   3. KWS unavailable (models not downloaded yet) → fall through silently
+    //      to existing text-based wake-word detection in wake-word.cjs
+    let _skipWakeWordCheck = skipWakeWordCheck;
+    if (!pushToTalk && !skipWakeWordCheck) {
+      const kwsResult = await kwsDetector.detectKeyword(audioBase64, format);
+      if (kwsResult.available) {
+        if (!kwsResult.detected && !kwsResult.decodeError) {
+          // Audio-domain: no wake word present — skip Groq API call entirely
+          logger.info('[Pipeline] KWS: no wake word in audio — skipping STT', {
+            durationMs: kwsResult.durationMs,
+          });
+          return { success: true, skipped: true, reason: 'no_wake_word_audio' };
+        } else if (kwsResult.detected) {
+          // Audio confirmed wake word — bypass redundant text-based check downstream
+          logger.info('[Pipeline] KWS: wake word confirmed in audio', {
+            keyword: kwsResult.keyword,
+            durationMs: kwsResult.durationMs,
+          });
+          _skipWakeWordCheck = true;
+        }
+        // kwsResult.decodeError → fall through to text-based detection
+      }
+    }
+
     journal.setVoiceStatus('processing');
-    logger.info('[Pipeline] process() called', { audioBase64Len: audioBase64.length, decodedBytes, format, pushToTalk, skipWakeWordCheck });
+    logger.info('[Pipeline] process() called', { audioBase64Len: audioBase64.length, decodedBytes, format, pushToTalk, skipWakeWordCheck: _skipWakeWordCheck });
 
     try {
       // ── Step 1: STT ──
@@ -349,8 +383,18 @@ class VoiceServiceMCPServer {
       //   4. If the user switches from Chinese to English, the next turn produces language='en'
       //      from Groq auto-detect, setSessionLanguage('en') is called, and the lock releases.
       const NON_LATIN_LANGS = new Set(['zh', 'ja', 'ko', 'ar', 'ru', 'hi', 'th', 'vi', 'uk']);
-      const journalSessionLang = journal.read().voice?.sessionLanguage;
-      const journalHint = (journalSessionLang && NON_LATIN_LANGS.has(journalSessionLang)) ? journalSessionLang : null;
+      const journalVoice = journal.read().voice || {};
+      const journalSessionLang = journalVoice.sessionLanguage;
+      // Expire language lock after 60s of inactivity
+      const lastActivity = journalVoice.lastLanguageActivityAt ? new Date(journalVoice.lastLanguageActivityAt).getTime() : 0;
+      const langIsExpired = lastActivity > 0 && (Date.now() - lastActivity) > 60 * 1000;
+      // Wake-word mode: NEVER pass language hint — always auto-detect.
+      // With a 'zh' hint active, Whisper encodes 'Armis'/'ThinkDrop' as Chinese characters
+      // and the wake-word regex can't find the Latin-script token.
+      // PTT mode: apply hint so Chinese/Japanese/etc. mid-conversation commands
+      // aren't hallucinated as English phonetics.
+      const isWakeWordMode = !pushToTalk && !_skipWakeWordCheck;
+      const journalHint = (!isWakeWordMode && journalSessionLang && NON_LATIN_LANGS.has(journalSessionLang) && !langIsExpired) ? journalSessionLang : null;
       const effectiveLanguageHint = languageHint || process.env.STT_LANGUAGE_HINT || journalHint || null;
       logger.info('[Pipeline] STT language hint', { effectiveLanguageHint, journalSessionLang, callerHint: languageHint || null });
       const sttResult = await voiceProvider.transcribe({ audioBase64, format, languageHint: effectiveLanguageHint });
@@ -361,7 +405,7 @@ class VoiceServiceMCPServer {
         return { success: true, skipped: true, reason: 'empty_transcript' };
       }
 
-      return await this._runPipeline({ sttResult, audioBase64, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+      return await this._runPipeline({ sttResult, audioBase64, pushToTalk, skipWakeWordCheck: _skipWakeWordCheck, sessionId, skipInject });
     } catch (err) {
       logger.error('[Pipeline] Error', { error: err.message });
       journal.setVoiceStatus('idle');
@@ -391,7 +435,7 @@ class VoiceServiceMCPServer {
         // Wake word mode: filter out low-confidence noise only.
         // Do NOT filter on language — user may intentionally speak Chinese, Spanish, etc.
         // Exception: if transcript contains a wake phrase, always allow through.
-        const WAKE_PHRASE_QUICK = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|listen\s*up|wake\s*up|i\s*need\s*you|are\s*you\s*there)\b/i;
+        const WAKE_PHRASE_QUICK = /\b(thinkdrop|think\s*drop|hey\s*think|yo\s*think|ok\s*think|armis|hey\s*armis|ok\s*armis|yo\s*armis)\b/i;
         const containsWakePhrase = WAKE_PHRASE_QUICK.test(sttResult.text);
         const isLowConfidenceNoise = !containsWakePhrase && confidence > 0 && confidence < 0.5;
         if (isLowConfidenceNoise) {
@@ -410,28 +454,71 @@ class VoiceServiceMCPServer {
       journal.setVoiceStatus('processing', { detectedLanguage: rawDetectedLanguage });
 
       if (!pushToTalk && !skipWakeWordCheck) {
-        const wakeResult = wakeWord.detect(sttResult.text);
-
-        // If wake phrase detected, strip it and proceed
-        if (wakeResult.detected) {
-          if (wakeResult.type !== 'cancel' && wakeResult.type !== 'status') {
-            sttResult.text = wakeWord.stripWakePhrase(sttResult.text, wakeResult.matchedPhrase);
+        // ── Active session window bypass ───────────────────────────────────────
+        // If the user said the wake word recently (within 15s), skip the wake-word
+        // check entirely — they are already in an active conversation.
+        const inActiveSession = journal.isWakeSessionActive();
+        // CJK-dominant utterances cannot physically contain a Latin wake word.
+        // If the user has been active in the last 5 minutes, treat it as in-session
+        // and refresh the 30s window so the conversation stays open.
+        // We check "mostly CJK" (>50% non-ASCII) rather than "purely CJK" so that
+        // mixed utterances like "你没有帮我去Amazon" still bypass the wake check.
+        const nonAsciiCount = (cleanedText.match(/[^\x00-\x7F]/g) || []).length;
+        const isMostlyCJK = nonAsciiCount > 0 && nonAsciiCount / cleanedText.replace(/\s/g,'').length > 0.5;
+        const cjkRecentBypass = isMostlyCJK && journal.isRecentlyActive();
+        if (inActiveSession || cjkRecentBypass) {
+          if (cjkRecentBypass && !inActiveSession) {
+            logger.info('[Pipeline] CJK-recent-session bypass — refreshing wake window', { text: sttResult.text.substring(0, 60) });
+            journal.setWakeSession();
+          } else {
+            logger.info('[Pipeline] Active session window — wake-word check bypassed', { text: sttResult.text.substring(0, 60) });
           }
         } else {
-          // No wake phrase — allow through ONLY if transcript starts with a clear question/command word.
-          // Word count alone is not sufficient — background chatter can be 5+ words.
-          const QUESTION_PREFIX = /^(what|where|when|who|why|how|can|could|will|would|should|is|are|do|does|did|tell|show|find|search|open|help|set|make|get|check|remind|play|create|build|run|send|write|schedule|look up|pull up|turn|type|scroll|press|click|focus|paste|copy|undo|tab|enter|install|list|go to|navigate|switch|close|minimize|maximize|use|using|i want|i need|i would|i('m| am)|i notice|now |let'?s|try|analyze|analyse|examine|delete|remove|save|show me|take|move|rename|read|launch|start|stop|enable|disable|download|upload|please|just|could you|can you|will you|would you|you('re| are| can| should| need| must| never| didn'?t| don'?t| haven'?t| weren'?t| aren'?t)|you just|you only|you still|that'?s|that is|no you|hey you|actually|wait|hold on|never mind|forget that|also|and then|then|after that|next|but|however|instead|again|redo|retry|fix|correct|update)\b/i;
+          // ── Minimum word gate ────────────────────────────────────────────────
+          // Coughs, throat-clears, single-syllable sounds, and short mumbles that
+          // slip past VAD are typically ≤1 word after transcription.
+          // Exception: if the single word IS the wake word, let it through so the
+          // user can say "Armis" or "ThinkDrop" alone to activate (returns too_short
+          // after stripping the wake phrase, so the user gets a prompt to continue).
+          const wordCount = cleanedText.split(/\s+/).filter(Boolean).length;
           const hasNonLatinScript = /[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F]/.test(cleanedText);
-          const isRealQuestion = QUESTION_PREFIX.test(cleanedText) || hasNonLatinScript;
+          const WAKE_PHRASE_QUICK = /\b(thinkdrop|think\s*drop|tinkdrop|tinkdrab|thinktrop|thinkidrop|hey\s*think|yo\s*think|ok\s*think|armis|armus|armys|armies|armas|ormis|hermes|hermis|harris|jarvis|artemis|hey\s*arm[iuy]s|ok\s*arm[iuy]s|yo\s*arm[iuy]s)\b/i;
+          const cleanedNoPunct = cleanedText.replace(/[^\w\s\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F]/g, ' ').trim();
+          const isSingleWordWakeWord = wordCount < 2 && !hasNonLatinScript && WAKE_PHRASE_QUICK.test(cleanedNoPunct);
 
-          if (!isRealQuestion) {
-            logger.info('[Pipeline] Wake word skipped — no wake phrase and no clear question/command prefix', { text: sttResult.text.substring(0, 60) });
+          if (wordCount < 2 && !hasNonLatinScript && !isSingleWordWakeWord) {
+            logger.info('[Pipeline] Wake word skipped — transcript too short (likely noise)', { text: sttResult.text.substring(0, 60), wordCount });
+            journal.setVoiceStatus('idle');
+            return { success: true, skipped: true, reason: 'too_short', transcript: sttResult.text };
+          }
+
+          const wakeResult = wakeWord.detect(sttResult.text);
+
+          if (wakeResult.detected) {
+            // Wake word confirmed — open the 15-second active session window
+            journal.setWakeSession();
+            if (wakeResult.type !== 'cancel' && wakeResult.type !== 'status') {
+              sttResult.text = wakeWord.stripWakePhrase(sttResult.text, wakeResult.matchedPhrase);
+            }
+            // If nothing remains after stripping (user said only the wake word),
+            // return too_short so the UI prompts them to continue speaking.
+            const remainingText = sttResult.text.trim();
+            if (!remainingText) {
+              logger.info('[Pipeline] Wake word only — session opened, prompting user to continue', { matched: wakeResult.matchedPhrase });
+              journal.setVoiceStatus('idle');
+              return { success: true, skipped: true, reason: 'too_short', wakeWordOnly: true, transcript: cleanedText };
+            }
+          } else {
+            // Strict wake-word mode: REQUIRE the wake word — no fallback bypass.
+            logger.info('[Pipeline] Wake word not detected — ignoring (strict mode)', { text: sttResult.text.substring(0, 60) });
             journal.setVoiceStatus('idle');
             return { success: true, skipped: true, reason: 'no_wake_word', transcript: sttResult.text };
           }
-          const wordCount = cleanedText.split(/\s+/).filter(Boolean).length;
-          logger.info('[Pipeline] Wake word bypassed — clear question/command prefix detected', { text: sttResult.text.substring(0, 60), wordCount });
         }
+      } else if (pushToTalk) {
+        // PTT always counts as an active interaction — refresh the session window
+        // so switching from PTT back to wake-word mode feels seamless.
+        journal.setWakeSession();
       }
 
       // ── Step 3 + 4a: Translate to English AND detect emotion in parallel ──────
@@ -692,7 +779,7 @@ class VoiceServiceMCPServer {
         }
       } catch (_spErr) {}
 
-      return {
+      const pipelineResult = {
         success: true,
         lane: 'fast',
         transcript: sttResult.text,
@@ -709,6 +796,10 @@ class VoiceServiceMCPServer {
         triggered: !!(responseMetadata.triggered),  // true when stategraph escalation fired in background
         metadata: responseMetadata,
       };
+      // Refresh the wake session on every successful response so multi-turn
+      // conversations stay alive without requiring the wake word again.
+      journal.setWakeSession();
+      return pipelineResult;
     } catch (error) {
       journal.setVoiceStatus('idle');
       logger.error('[Pipeline] Error', { error: error.message });
@@ -1175,6 +1266,11 @@ class VoiceServiceMCPServer {
 
   async start() {
     logger.info('Starting Voice Service MCP server');
+
+    // Reset sessionLanguage on startup — journal persists language across restarts
+    // which causes the previous session's language (e.g. 'zh') to lock all subsequent
+    // audio through the wrong Whisper decoder. Always start fresh in English.
+    journal.setSessionLanguage('en');
 
     const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Type', 'application/json');
