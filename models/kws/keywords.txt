@@ -1,10 +1,16 @@
 AA1 R M IH0 S @armis
 AE1 R M IH0 S @armis_ae
+AA1 R M IH1 S @armis_stressed
+AH0 R M IH0 S @armis_schwa
+EH1 R M IH0 S @armis_eh
 AA1 R M AH0 S @armus
 AE1 R M AH0 S @armus_ae
+AH0 R M AH0 S @armus_schwa
 HH EY1 AA1 R M IH0 S @hey_armis
+HH EY1 AE1 R M IH0 S @hey_armis_ae
 HH AY1 AA1 R M IH0 S @hi_armis
 OW0 K EY1 AA1 R M IH0 S @ok_armis
+HH EY1 AA1 R M AH0 S @hey_armus
 h āi AA1 R M IH0 S @hai_armis
 TH IH1 NG K D R AA1 P @think_drop
 HH EY1 TH IH1 NG K D R AA1 P @hey_think_drop

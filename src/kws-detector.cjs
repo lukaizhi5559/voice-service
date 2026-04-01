@@ -152,7 +152,7 @@ function _initialize() {
       },
       maxActivePaths:    8,
       numTrailingBlanks: 2,
-      keywordsScore:     2.0,
+      keywordsScore:     3.0,
       keywordsThreshold: 0.05,
       keywordsFile:      path.join(MODEL_DIR, f.keywords),
     };

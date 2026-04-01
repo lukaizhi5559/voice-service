@@ -238,6 +238,36 @@ class VoiceServiceMCPServer {
     }
   }
 
+  // ─── OpenAI TTS — used as fallback for non-English from the renderer ───────
+
+  /**
+   * Synthesize text using OpenAI TTS specifically.
+   * Called by the renderer when Kokoro (English-only WASM) can't handle the language.
+   * @param {{ text: string, language?: string }} args
+   */
+  async openaiTts(args) {
+    const { text, language = 'en' } = args || {};
+    if (!text || !text.trim()) {
+      return { success: false, error: 'text is required' };
+    }
+    const openaiTtsProvider = require('./providers/openai-tts.cjs');
+    if (!openaiTtsProvider.isAvailable()) {
+      return { success: false, error: 'OPENAI_API_KEY not configured' };
+    }
+    try {
+      const result = await openaiTtsProvider.synthesize({ text, language });
+      return {
+        success: true,
+        audioBase64: result.audioBuffer.toString('base64'),
+        format: result.format || 'mp3',
+        language,
+      };
+    } catch (err) {
+      logger.error('[Server] OpenAI TTS error', { error: err.message });
+      return { success: false, error: err.message };
+    }
+  }
+
   // ─── TTS ─────────────────────────────────────────────────────────────────────
 
   /**
@@ -303,6 +333,8 @@ class VoiceServiceMCPServer {
       skipSTT = false,
       // PTT text-only mode: run STT only, skip LLM/inject, return transcript
       skipInject = false,
+      // Skip Cartesia TTS entirely — renderer uses speechSynthesis for instant playback
+      skipTTS = false,
     } = args || {};
 
     // ── Pre-transcribed path (Web Speech API / native STT) ───────────────────
@@ -314,7 +346,7 @@ class VoiceServiceMCPServer {
       // Inject directly into the pipeline at step 2 with a synthetic sttResult
       const sttResult = { text: preTranscript, language: languageHint || 'en', confidence: 1.0, isFinal: true };
       try {
-        return await this._runPipeline({ sttResult, audioBase64: null, pushToTalk, skipWakeWordCheck, sessionId, skipInject });
+        return await this._runPipeline({ sttResult, audioBase64: null, pushToTalk, skipWakeWordCheck, sessionId, skipInject, skipTTS });
       } catch (err) {
         logger.error('[Pipeline] Error in skipSTT path', { error: err.message });
         journal.setVoiceStatus('idle');
@@ -339,31 +371,45 @@ class VoiceServiceMCPServer {
     // word in the raw audio, skip Groq entirely — no transcription cost, and we
     // avoid Whisper hallucinating "Armis" as "harvest" / "I promise" / "permiss".
     //
-    // Three outcomes:
+    // Four outcomes:
+    //   0. Active 30s session open        → skip KWS entirely (user is mid-conversation)
     //   1. KWS available + keyword NOT detected → bail out immediately
     //   2. KWS available + keyword detected     → set skipWakeWordCheck=true
     //      (audio already confirmed wake word; skip redundant text-based check)
     //   3. KWS unavailable (models not downloaded yet) → fall through silently
     //      to existing text-based wake-word detection in wake-word.cjs
+    //
+    // IMPORTANT: the active session check MUST happen here, before KWS, because
+    // _runPipeline() is never reached if KWS rejects the chunk. Without this,
+    // follow-up speech within the 30s window gets rejected as 'no_wake_word_audio'.
     let _skipWakeWordCheck = skipWakeWordCheck;
     if (!pushToTalk && !skipWakeWordCheck) {
-      const kwsResult = await kwsDetector.detectKeyword(audioBase64, format);
-      if (kwsResult.available) {
-        if (!kwsResult.detected && !kwsResult.decodeError) {
-          // Audio-domain: no wake word present — skip Groq API call entirely
-          logger.info('[Pipeline] KWS: no wake word in audio — skipping STT', {
-            durationMs: kwsResult.durationMs,
-          });
-          return { success: true, skipped: true, reason: 'no_wake_word_audio' };
-        } else if (kwsResult.detected) {
-          // Audio confirmed wake word — bypass redundant text-based check downstream
-          logger.info('[Pipeline] KWS: wake word confirmed in audio', {
-            keyword: kwsResult.keyword,
-            durationMs: kwsResult.durationMs,
-          });
-          _skipWakeWordCheck = true;
+      if (journal.isWakeSessionActive()) {
+        // Already in an active conversation — bypass KWS and wake-word text check.
+        logger.info('[Pipeline] Active session — bypassing KWS gate (30s window)');
+        _skipWakeWordCheck = true;
+      } else {
+        const kwsResult = await kwsDetector.detectKeyword(audioBase64, format);
+        if (kwsResult.available) {
+          if (!kwsResult.detected && !kwsResult.decodeError) {
+            // Audio-domain: no wake word present — skip Groq API call entirely
+            logger.info('[Pipeline] KWS: no wake word in audio — skipping STT', {
+              durationMs: kwsResult.durationMs,
+            });
+            return { success: true, skipped: true, reason: 'no_wake_word_audio' };
+          } else if (kwsResult.detected) {
+            // KWS confirmed wake word — open session and signal renderer immediately.
+            // Renderer's webkitSpeechRecognition will handle all follow-up STT+TTS,
+            // so we skip Deepgram, LLM, and Cartesia for this chunk entirely.
+            logger.info('[Pipeline] KWS: wake word confirmed — opening session, skipping STT/LLM/TTS', {
+              keyword: kwsResult.keyword,
+              durationMs: kwsResult.durationMs,
+            });
+            journal.setWakeSession();
+            return { success: true, skipped: false, wakeActivated: true, keyword: kwsResult.keyword };
+          }
+          // kwsResult.decodeError → fall through to text-based detection
         }
-        // kwsResult.decodeError → fall through to text-based detection
       }
     }
 
@@ -405,7 +451,7 @@ class VoiceServiceMCPServer {
         return { success: true, skipped: true, reason: 'empty_transcript' };
       }
 
-      return await this._runPipeline({ sttResult, audioBase64, pushToTalk, skipWakeWordCheck: _skipWakeWordCheck, sessionId, skipInject });
+      return await this._runPipeline({ sttResult, audioBase64, pushToTalk, skipWakeWordCheck: _skipWakeWordCheck, sessionId, skipInject, skipTTS });
     } catch (err) {
       logger.error('[Pipeline] Error', { error: err.message });
       journal.setVoiceStatus('idle');
@@ -413,7 +459,7 @@ class VoiceServiceMCPServer {
     }
   }
 
-  async _runPipeline({ sttResult, audioBase64 = null, pushToTalk, skipWakeWordCheck, sessionId, skipInject = false }) {
+  async _runPipeline({ sttResult, audioBase64 = null, pushToTalk, skipWakeWordCheck, sessionId, skipInject = false, skipTTS = false }) {
     try {
       // ── Noise filter ──
       // Strip parenthetical sound-effect labels first, keep actual spoken words
@@ -710,6 +756,22 @@ class VoiceServiceMCPServer {
       }
 
       journal.setVoiceStatus('speaking');
+      // Skip Cartesia when renderer handles TTS via speechSynthesis (active-session path)
+      if (skipTTS) {
+        journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
+        journal.setWakeSession();
+        return {
+          success: true, lane: 'fast',
+          transcript: sttResult.text,
+          detectedLanguage, wasTranslated, englishText,
+          responseEnglish: responseDisplay,
+          fullAnswer: fullAnswerDisplay,
+          _hadLiveStream: !!(responseMetadata.hadLiveStream),
+          responseFinal: responseInUserLanguage,
+          triggered: !!(responseMetadata.triggered),
+          metadata: responseMetadata,
+        };
+      }
       const ttsResult = await voiceProvider.synthesize(ttsOpts);
       journal.setVoiceStatus('idle', { lastSpokenAt: new Date().toISOString() });
 
@@ -1273,14 +1335,17 @@ class VoiceServiceMCPServer {
     journal.setSessionLanguage('en');
 
     const server = http.createServer(async (req, res) => {
-      res.setHeader('Content-Type', 'application/json');
       res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
         return;
       }
+
+      res.setHeader('Content-Type', 'application/json');
 
       // Health
       if (req.url === '/health' || req.url === '/service.health') {
@@ -1315,6 +1380,9 @@ class VoiceServiceMCPServer {
                 break;
               case '/voice.process':
                 result = await this.process(payload);
+                break;
+              case '/voice.tts':
+                result = await this.openaiTts(payload);
                 break;
               case '/voice.signal':
                 result = await this.writeSignal(payload);
