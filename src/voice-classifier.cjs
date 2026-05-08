@@ -425,9 +425,8 @@ async function classifyFreshTask(prompt, pausedQuestion) {
     const questionEmb = await embed(embedder, pausedQuestion);
     const similarity = cosine(promptEmb, questionEmb);
 
-    const FRESH_THRESHOLD = 0.35;
-    const ACTION_WEAK_THRESHOLD = 0.55;
-    const isFreshTask = similarity < FRESH_THRESHOLD || (isActionCommand && similarity < ACTION_WEAK_THRESHOLD);
+    const FRESH_THRESHOLD = 0.45;  // Increased from 0.35 for better question-answer matching
+    const isFreshTask = similarity < FRESH_THRESHOLD;  // Simplified: no action-command override
 
     return { isFreshTask, similarity, isActionCommand };
   } catch (err) {
