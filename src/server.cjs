@@ -1187,7 +1187,7 @@ class VoiceServiceMCPServer {
       ws.on('open', () => {
         ws.send(JSON.stringify({
           id: requestId, type: 'llm_request',
-          payload: { prompt: text, provider: 'openai', options: { maxTokens: 100, temperature: 0.7, model: 'gpt-4o-mini', stream: true }, context: { systemInstructions: systemPrompt || '' } },
+          payload: { prompt: text, provider: 'auto', options: { maxTokens: 100, temperature: 0.7, stream: true, taskType: 'heartbeat' }, context: { systemInstructions: systemPrompt || '' } },
           timestamp: Date.now(), metadata: { source: 'voice_fast_lane' },
         }));
       });
@@ -1225,7 +1225,7 @@ class VoiceServiceMCPServer {
       ws.on('open', () => {
         ws.send(JSON.stringify({
           id: requestId, type: 'llm_request',
-          payload: { prompt: text, provider: 'openai', options: { maxTokens: 100, temperature: 0.7, model: 'gpt-4o-mini', stream: true }, context: { systemInstructions: systemPrompt || '' } },
+          payload: { prompt: text, provider: 'auto', options: { maxTokens: 100, temperature: 0.7, stream: true, taskType: 'heartbeat' }, context: { systemInstructions: systemPrompt || '' } },
           timestamp: Date.now(), metadata: { source: 'voice_fast_lane' },
         }));
       });
