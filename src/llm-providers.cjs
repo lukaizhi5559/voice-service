@@ -199,7 +199,8 @@ async function askEarly(messages, opts = {}) {
   const apiKey = process.env.OPENAI_API_KEY || '';
   if (!apiKey) {
     const { text, provider } = await ask(messages, opts);
-    const match = text.match(/^[^.?!]*[.?!]/);
+    // First "real" sentence boundary — see checkEarly below for the pattern rationale.
+    const match = text.match(/^[\s\S]{5,}?(?<![A-Z][a-z]{1,3})[.?!](?=\s+[^a-z]|$)/);
     const firstSentence = (match && match[0].trim().length > 4) ? match[0].trim() : text.trim();
     return { firstSentence, fullText: text, provider };
   }
@@ -226,7 +227,13 @@ async function askEarly(messages, opts = {}) {
 
     const checkEarly = () => {
       if (earlyResolved) return;
-      const match = fullText.match(/^[^.?!]*[.?!]/);
+      // First "real" sentence boundary: ≥5 chars, terminator followed by
+      // whitespace + a non-lowercase char (lowercase continuation = mid-
+      // sentence, e.g. "e.g. you..."), and not preceded by a short title-case
+      // word (Mr./Dr./Jr./Jan.-style abbreviations). Mid-token dots
+      // ("Three.js", "v1.2", "3.14") and chunk boundaries ending in "." are
+      // skipped.
+      const match = fullText.match(/^[\s\S]{5,}?(?<![A-Z][a-z]{1,3})[.?!](?=\s+[^a-z])/);
       if (match && match[0].trim().length > 4) {
         firstSentence = match[0].trim();
         earlyResolved = true;
