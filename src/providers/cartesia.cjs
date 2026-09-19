@@ -10,7 +10,7 @@
  * Docs: https://docs.cartesia.ai/api-reference/tts/bytes
  */
 
-const stt = require('../stt.cjs');
+const stt = require('../deprecated/stt.cjs');
 const logger = require('../logger.cjs');
 const axios = require('axios');
 

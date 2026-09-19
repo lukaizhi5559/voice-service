@@ -15,7 +15,7 @@ const path = require('path');
 const os = require('os');
 const { execSync, spawn } = require('child_process');
 const axios = require('axios');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 // ── Inworld TTS ────────────────────────────────────────────────────────────
 const INWORLD_TTS_URL = 'https://api.inworld.ai/tts/v1/voice';

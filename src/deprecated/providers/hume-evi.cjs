@@ -27,7 +27,7 @@
 const WebSocket = require('ws');
 const https = require('https');
 const http = require('http');
-const logger = require('../logger.cjs');
+const logger = require('../../logger.cjs');
 
 const HUME_API_KEY    = process.env.HUME_API_KEY || '';
 const HUME_API_SECRET = process.env.HUME_API_SECRET || '';

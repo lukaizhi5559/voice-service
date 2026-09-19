@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL      = process.env.GROQ_STT_MODEL      || 'whisper-large-v3-turbo';

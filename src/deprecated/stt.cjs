@@ -14,7 +14,7 @@ const path = require('path');
 const os = require('os');
 const FormData = require('form-data');
 const axios = require('axios');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 const deepgramStt = require('./deepgram-stt.cjs');
 const groqStt = require('./groq-stt.cjs');
 

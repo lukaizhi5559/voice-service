@@ -3,11 +3,12 @@
 /**
  * OpenAI TTS provider
  *
- * TTS:  OpenAI /v1/audio/speech — 57 languages, natural quality (~300ms)
- * STT:  Groq Whisper (reused from existing stt.cjs)
+ * TTS:  OpenAI /v1/audio/speech — gpt-4o-mini-tts is the model behind
+ *       ChatGPT voice mode. Voices marin/cedar are the latest ChatGPT
+ *       voices; `instructions` lets us steer tone ("warm, natural").
  *
- * Used as the fallback TTS when Kokoro WASM can't handle a language.
- * Returns audioBase64 (mp3) for the renderer to play via AudioContext.
+ * Returns the full audio buffer; callers that stream can pass onChunk()
+ * to receive data as it arrives.
  */
 
 const https = require('https');
@@ -15,14 +16,16 @@ const logger = require('../logger.cjs');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
-// tts-1 = fast + cheap; tts-1-hd = higher quality (~2× latency)
-const TTS_MODEL = process.env.OPENAI_TTS_MODEL || 'tts-1';
-const TTS_VOICE = process.env.OPENAI_TTS_VOICE || 'nova';  // nova is warm, natural, multilingual
+// gpt-4o-mini-tts = ChatGPT voice model; marin/cedar = recommended voices
+const TTS_MODEL = process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts';
+const TTS_VOICE = process.env.OPENAI_TTS_VOICE || 'marin';
+const TTS_INSTRUCTIONS = process.env.OPENAI_TTS_INSTRUCTIONS || '';
+const TTS_FORMAT = process.env.OPENAI_TTS_FORMAT || 'mp3'; // mp3 | wav | pcm | opus
 
 // OpenAI maps input language automatically — no explicit lang param needed.
 // Full list: https://platform.openai.com/docs/guides/text-to-speech/supported-languages
 
-function synthesize({ text, language }) {
+function synthesize({ text, language, onChunk }) {
   if (!OPENAI_API_KEY) {
     return Promise.reject(new Error('OPENAI_API_KEY not set'));
   }
@@ -30,12 +33,17 @@ function synthesize({ text, language }) {
     return Promise.reject(new Error('text is required'));
   }
 
-  const body = JSON.stringify({
+  const payload = {
     model: TTS_MODEL,
     input: text,
     voice: TTS_VOICE,
-    response_format: 'mp3',
-  });
+    response_format: TTS_FORMAT,
+  };
+  // `instructions` is supported on gpt-4o-mini-tts (steers tone/delivery)
+  if (TTS_INSTRUCTIONS && TTS_MODEL.includes('gpt-4o')) {
+    payload.instructions = TTS_INSTRUCTIONS;
+  }
+  const body = JSON.stringify(payload);
 
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -59,13 +67,16 @@ function synthesize({ text, language }) {
       }
 
       const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
+      res.on('data', chunk => {
+        chunks.push(chunk);
+        if (onChunk) { try { onChunk(chunk); } catch (_) {} }
+      });
       res.on('end', () => {
         const audioBuffer = Buffer.concat(chunks);
-        logger.info('[OpenAI TTS] synthesized', { bytes: audioBuffer.length, lang: language || 'auto', voice: TTS_VOICE });
+        logger.info('[OpenAI TTS] synthesized', { bytes: audioBuffer.length, lang: language || 'auto', voice: TTS_VOICE, model: TTS_MODEL });
         resolve({
           audioBuffer,
-          format: 'mp3',
+          format: TTS_FORMAT,
           sampleRate: 24000,
         });
       });

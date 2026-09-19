@@ -16,7 +16,7 @@
 'use strict';
 
 const https = require('https');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const SUPPORTED_LANGUAGES = (process.env.SUPPORTED_LANGUAGES || 'en,zh,es,fr,pt,ar,ja,ko,hi,de,it,ru').split(',');
 

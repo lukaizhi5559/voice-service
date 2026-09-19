@@ -10,7 +10,7 @@
  * ElevenLabs/Inworld TTS keys are unavailable or over quota.
  */
 
-const groqStt = require('../groq-stt.cjs');
+const groqStt = require('../deprecated/groq-stt.cjs');
 const macosNative = require('./macos-native.cjs');
 const logger = require('../logger.cjs');
 

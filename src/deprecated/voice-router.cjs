@@ -15,7 +15,7 @@
 
 'use strict';
 
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 const journal = require('./voice-journal.cjs');
 
 /**

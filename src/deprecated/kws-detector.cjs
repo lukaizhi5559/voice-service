@@ -37,7 +37,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const MODEL_DIR = path.join(__dirname, '..', 'models', 'kws');
 const CONFIG_PATH = path.join(MODEL_DIR, 'model-config.json');

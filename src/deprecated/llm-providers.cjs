@@ -16,7 +16,7 @@
  */
 
 const https = require('https');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const DEFAULT_MAX_TOKENS  = 150;
 const DEFAULT_TEMPERATURE = 0.7;

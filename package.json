@@ -39,6 +39,7 @@
     "fuse.js": "^7.0.0",
     "groq-sdk": "^0.37.0",
     "node-record-lpcm16": "^1.0.1",
+    "playwright": "^1.61.1",
     "sherpa-onnx-node": "^1.12.29",
     "winston": "^3.11.0",
     "ws": "^8.16.0"

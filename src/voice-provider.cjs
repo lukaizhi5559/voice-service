@@ -30,17 +30,22 @@
 const logger = require('./logger.cjs');
 
 // ── Provider modules ──────────────────────────────────────────────────────────
-const humeEvi       = require('./providers/hume-evi.cjs');
+const openaiTts     = require('./providers/openai-tts.cjs');
 const inworld       = require('./providers/inworld.cjs');
 const cartesia      = require('./providers/cartesia.cjs');
 const groqProvider  = require('./providers/groq.cjs');
 const macosNative   = require('./providers/macos-native.cjs');
 const resemble      = require('./providers/resemble.cjs');
+// Hume EVI is archived — kept optional so the module still loads without it.
+let humeEvi = null;
+try { humeEvi = require('./deprecated/providers/hume-evi.cjs'); } catch (_) {}
 
 // ── Fallback chain ────────────────────────────────────────────────────────────
-const FALLBACK_CHAIN = ['resemble', 'cartesia', 'inworld', 'groq', 'macos', 'hume'];
+// openai (gpt-4o-mini-tts, ChatGPT voices) → cartesia → inworld → groq → macos
+const FALLBACK_CHAIN = ['openai', 'cartesia', 'inworld', 'groq', 'macos'];
 
 const PROVIDER_MAP = {
+  openai:     openaiTts,
   hume:       humeEvi,
   inworld:    inworld,
   cartesia:   cartesia,
@@ -151,7 +156,7 @@ function setProvider(name) {
     throw new Error(`Unknown voice provider: ${name}. Valid: ${Object.keys(PROVIDER_MAP).join(', ')}`);
   }
   // Close the persistent EVI session if we're switching away from hume
-  if (_activeProviderName === 'hume' && norm !== 'hume') {
+  if (_activeProviderName === 'hume' && norm !== 'hume' && humeEvi) {
     try { humeEvi.closePersistentSession(); } catch (_) {}
   }
   _activeProviderName = norm;
@@ -239,7 +244,7 @@ async function synthesize(args) {
  * Only valid when isHumeEVI() === true.
  */
 async function eviProcessAudio(args) {
-  if (!isHumeEVI()) throw new Error('eviProcessAudio() called but active provider is not Hume EVI');
+  if (!isHumeEVI() || !humeEvi) throw new Error('eviProcessAudio() called but Hume EVI is unavailable');
   return humeEvi.processAudio(args);
 }
 

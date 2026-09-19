@@ -38,7 +38,7 @@
 
 const http   = require('http');
 const crypto = require('crypto');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const MEMORY_SERVICE_PORT = parseInt(process.env.MEMORY_SERVICE_PORT || '3001', 10);
 const MEM_API_KEY = process.env.MCP_USER_MEMORY_API_KEY || process.env.USER_MEMORY_API_KEY || process.env.MCP_API_KEY || '';

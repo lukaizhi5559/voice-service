@@ -21,7 +21,7 @@
 'use strict';
 
 const Fuse = require('fuse.js');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const DEFAULT_WAKE_PHRASES = [
   // --- Core & Formal ---

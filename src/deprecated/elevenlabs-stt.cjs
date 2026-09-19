@@ -13,7 +13,7 @@ const path = require('path');
 const os = require('os');
 const FormData = require('form-data');
 const axios = require('axios');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 // ── Groq Whisper ─────────────────────────────────────────────────────────────
 const GROQ_STT_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ThinkDrop Voice Worker</title>
+<style>
+  /* Invisible worker page — the window is 1x1 offscreen. This UI only shows
+     if someone opens /voice/worker manually (debug). */
+  body { margin:0; background:#0a0a0f; color:#888; font:12px/1.4 -apple-system,monospace;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; }
+  #state { font-size:14px; color:#ccc; margin-bottom:8px; }
+  #log { max-height:60vh; overflow-y:auto; width:90%; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div id="state">connecting…</div>
+<div id="log"></div>
+<script>
+'use strict';
+/**
+ * ThinkDrop voice worker — runs inside a hidden real-Chrome window launched
+ * by companion-driver.cjs (Playwright channel:'chrome', 1x1 offscreen).
+ *
+ * Responsibilities:
+ *   - webkitSpeechRecognition → stream {interim,final,state,error} over WS
+ *   - Receive {audio-begin, <binary frames>, audio-end} → decode + play TTS
+ *   - Receive {speak} → speechSynthesis fallback
+ *   - Barge-in: new speech while speaking → cancel playback, keep listening
+ *   - Optional mic level meter (?level=0 disables) for overlay voice bars
+ *
+ * The page has NO user gesture — audio autoplay relies on
+ * --autoplay-policy=no-user-gesture-required (set by the driver).
+ */
+
+const params = new URLSearchParams(location.search);
+const WS_URL = params.get('ws') || `ws://${location.host}/voice.ws`;
+const LANG = params.get('lang') || navigator.language || 'en-US';
+const LEVEL_METER = params.get('level') !== '0';
+
+const stateEl = document.getElementById('state');
+const logEl = document.getElementById('log');
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = `[${new Date().toISOString().slice(11, 23)}] ${msg}`;
+  logEl.prepend(line);
+  while (logEl.children.length > 120) logEl.lastChild.remove();
+}
+
+// ---------------------------------------------------------------- WS client
+let ws = null;
+let wsReady = false;
+let sessionActive = false;   // server sets via {type:'session', active}
+let reconnectDelay = 500;
+
+function send(obj) {
+  if (wsReady) { try { ws.send(JSON.stringify(obj)); } catch (_) {} }
+}
+function setState(state) {
+  stateEl.textContent = state;
+  send({ type: 'state', state });
+}
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    wsReady = true;
+    reconnectDelay = 500;
+    log('ws connected');
+    send({ type: 'ready', lang: LANG, ua: navigator.userAgent });
+    if (sessionActive) startListening();
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+      handleCommand(msg);
+    } else {
+      pendingAudio.push(ev.data); // binary TTS frame
+    }
+  };
+}
+
+// ------------------------------------------------------------- commands
+function handleCommand(msg) {
+  switch (msg.type) {
+    case 'session':
+      sessionActive = !!msg.active;
+      log(`session ${sessionActive ? 'start' : 'stop'}`);
+      if (sessionActive) startListening(); else stopListening();
+      break;
+    case 'audio-begin':
+      pendingAudio = [];
+      audioFormat = msg.format || 'wav';
+      interruptPlayback();
+      break;
+    case 'audio-end':
+      playBufferedAudio();
+      break;
+    case 'speak': // speechSynthesis fallback
+      speakFallback(msg.text, msg.lang);
+      break;
+    case 'stop': // barge-in / abort playback
+      interruptPlayback();
+      break;
+    case 'ping':
+      send({ type: 'pong' });
+      break;
+  }
+}
+
+// ------------------------------------------------- SpeechRecognition (STT)
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let wantListening = false;
+let speaking = false;
+let currentLang = LANG;
+
+if (SR) {
+  recognition = new SR();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = LANG;
+
+  recognition.onresult = (ev) => {
+    let interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const res = ev.results[i];
+      const text = res[0].transcript;
+      if (res.isFinal) {
+        const lang = detectScriptLang(text) || currentLang;
+        log(`final: ${text}`);
+        send({ type: 'final', text: text.trim(), lang });
+      } else {
+        interim += text;
+      }
+    }
+    if (interim) {
+      // Barge-in: user talking while TTS plays → kill playback.
+      if (speaking) interruptPlayback();
+      send({ type: 'interim', text: interim.trim(), lang: currentLang });
+    }
+  };
+  recognition.onerror = (ev) => {
+    log(`sr error: ${ev.error}`);
+    send({ type: 'error', error: ev.error });
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      wantListening = false;
+      setState('error');
+    }
+  };
+  recognition.onend = () => {
+    // Chrome stops recognition on silence — keep it alive while wanted.
+    if (wantListening && !speaking) {
+      try { recognition.start(); } catch (_) {}
+    } else if (wantListening && speaking) {
+      // restarted when playback ends
+    } else {
+      setState('idle');
+    }
+  };
+  recognition.onstart = () => setState('listening');
+} else {
+  send({ type: 'error', error: 'speech-recognition-unsupported' });
+  stateEl.textContent = 'SpeechRecognition unsupported';
+}
+
+function startListening() {
+  if (!recognition) return;
+  wantListening = true;
+  if (!speaking) {
+    try { recognition.start(); } catch (_) {}
+  }
+  startLevelMeter();
+}
+
+function stopListening() {
+  wantListening = false;
+  interruptPlayback();
+  try { recognition && recognition.stop(); } catch (_) {}
+  setState('idle');
+}
+
+// crude script→lang heuristic (kept from VoiceCompanion)
+function detectScriptLang(text) {
+  if (/[぀-ヿ]/.test(text)) return 'ja';
+  if (/[가-힯]/.test(text)) return 'ko';
+  if (/[一-鿿]/.test(text)) return 'zh';
+  if (/[؀-ۿ]/.test(text)) return 'ar';
+  if (/[а-яё]/i.test(text)) return 'ru';
+  return null;
+}
+
+// -------------------------------------------------------------- TTS playback
+let audioCtx = null;
+let pendingAudio = [];
+let audioFormat = 'wav';
+let currentSource = null;
+
+function getCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+
+async function playBufferedAudio() {
+  if (!pendingAudio.length) return;
+  const blob = new Blob(pendingAudio, { type: `audio/${audioFormat}` });
+  pendingAudio = [];
+  try {
+    const buf = await getCtx().decodeAudioData(await blob.arrayBuffer());
+    playBuffer(buf);
+  } catch (e) {
+    log(`decode failed: ${e.message}`);
+    send({ type: 'error', error: 'tts-decode-failed' });
+  }
+}
+
+function playBuffer(buf) {
+  // Pause recognition while speaking — avoids the mic hearing our own TTS.
+  speaking = true;
+  try { recognition && recognition.stop(); } catch (_) {}
+  setState('speaking');
+  const src = getCtx().createBufferSource();
+  src.buffer = buf;
+  src.connect(getCtx().destination);
+  currentSource = src;
+  src.onended = () => {
+    if (currentSource === src) {
+      currentSource = null;
+      speaking = false;
+      if (wantListening) { try { recognition.start(); } catch (_) {} }
+      setState(wantListening ? 'listening' : 'idle');
+      send({ type: 'speak-done' });
+    }
+  };
+  src.start();
+}
+
+function speakFallback(text, lang) {
+  if (!text) return;
+  interruptPlayback();
+  speaking = true;
+  try { recognition && recognition.stop(); } catch (_) {}
+  setState('speaking');
+  const u = new SpeechSynthesisUtterance(text);
+  if (lang) u.lang = lang;
+  u.onend = u.onerror = () => {
+    speaking = false;
+    if (wantListening) { try { recognition.start(); } catch (_) {} }
+    setState(wantListening ? 'listening' : 'idle');
+    send({ type: 'speak-done' });
+  };
+  speechSynthesis.speak(u);
+}
+
+function interruptPlayback() {
+  if (currentSource) { try { currentSource.onended = null; currentSource.stop(); } catch (_) {} currentSource = null; }
+  try { speechSynthesis.cancel(); } catch (_) {}
+  if (speaking) {
+    speaking = false;
+    send({ type: 'interrupted' });
+    if (wantListening) { try { recognition.start(); } catch (_) {} setState('listening'); }
+  }
+  pendingAudio = [];
+}
+
+// ------------------------------------------------------------- level meter
+async function startLevelMeter() {
+  if (!LEVEL_METER || startLevelMeter.done) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = getCtx();
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    startLevelMeter.done = true;
+    setInterval(() => {
+      if (!wantListening && !speaking) return;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+      send({ type: 'level', level: Math.min(1, Math.sqrt(sum / data.length) * 3) });
+    }, 100);
+  } catch (e) {
+    log(`level meter failed: ${e.message}`);
+  }
+}
+
+connect();
+log('worker loaded');
+</script>
+</body>
+</html>

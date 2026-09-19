@@ -12,8 +12,8 @@
  * No new logic — just delegation to the existing stt.cjs + elevenlabs-tts.cjs modules.
  */
 
-const stt = require('../stt.cjs');
-const tts = require('../inworld-tts.cjs');
+const stt = require('../deprecated/stt.cjs');
+const tts = require('../deprecated/inworld-tts.cjs');
 const logger = require('../logger.cjs');
 
 function isAvailable() {

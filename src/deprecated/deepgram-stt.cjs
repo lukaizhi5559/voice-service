@@ -27,7 +27,7 @@ const path = require('path');
 const os   = require('os');
 const https = require('https');
 const FormData = require('form-data');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 // nova-2 (not nova-2-general) supports 30+ languages with detect_language=true

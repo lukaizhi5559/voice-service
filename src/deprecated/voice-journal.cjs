@@ -50,7 +50,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 const JOURNAL_DIR = path.join(os.homedir(), '.thinkdrop');
 const JOURNAL_PATH = process.env.VOICE_JOURNAL_PATH

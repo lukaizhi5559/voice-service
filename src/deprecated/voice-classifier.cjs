@@ -18,7 +18,7 @@
  */
 
 const path = require('path');
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 // Point Xenova cache at the shared phi4-service model directory so we don't
 // download the model twice. If that path doesn't exist we fall back to the

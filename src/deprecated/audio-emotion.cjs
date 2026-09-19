@@ -25,7 +25,7 @@
  *   neutral        → (no tag)
  */
 
-const logger = require('./logger.cjs');
+const logger = require('../logger.cjs');
 
 // ── Thresholds (tuned for 16-bit PCM / WAV from browser VAD) ─────────────────
 const ENERGY_HIGH   = 0.25;   // RMS > this → loud / yelling
