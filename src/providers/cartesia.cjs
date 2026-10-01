@@ -60,7 +60,7 @@ async function synthesize({ text, language = 'en', voiceId }) {
     textPreview: text.substring(0, 80),
   });
 
-  const response = await axios.post(CARTESIA_TTS_URL, {
+  const payload = {
     model_id: CARTESIA_MODEL_ID,
     transcript: text,
     voice: { mode: 'id', id: voice },
@@ -68,7 +68,16 @@ async function synthesize({ text, language = 'en', voiceId }) {
     // native Chromium decode (no MP3 decoder needed), smaller IPC payload than mp3/44100.
     output_format: { container: 'wav', encoding: 'pcm_s16le', sample_rate: 22050 },
     language: lang,
-  }, {
+  };
+
+  // sonic-3+: whole-utterance delivery defaults (inline <emotion/> tags in the
+  // transcript still take precedence per-span). e.g. CARTESIA_EMOTION=warm
+  const genCfg = {};
+  if (process.env.CARTESIA_EMOTION) genCfg.emotion = process.env.CARTESIA_EMOTION;
+  if (process.env.CARTESIA_SPEED) genCfg.speed = process.env.CARTESIA_SPEED;
+  if (Object.keys(genCfg).length) payload.generation_config = genCfg;
+
+  const response = await axios.post(CARTESIA_TTS_URL, payload, {
     headers: {
       'X-API-Key': CARTESIA_API_KEY,
       'Cartesia-Version': CARTESIA_API_VERSION,

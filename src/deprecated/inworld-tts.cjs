@@ -47,6 +47,12 @@ async function synthesize({ text, language = 'en' }) {
   }
 
   // ── 2. macOS native fallback ────────────────────────────────────────────────────────
+  // The voice bridge's no-robotic contract: macOS `say` only runs as an
+  // explicit debug escape hatch. Otherwise fail so the provider chain can
+  // report unavailability honestly (fillers skip, /voice.say → spoken:false).
+  if (process.env.VOICE_ALLOW_SYSTEM_VOICE !== '1') {
+    throw new Error('Inworld unavailable (quality providers exhausted — macOS say disabled)');
+  }
   logger.warn('[TTS] Inworld unavailable — falling back to native macOS TTS');
   return synthesizeNative({ text, language });
 }

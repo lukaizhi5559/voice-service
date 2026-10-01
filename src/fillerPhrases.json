@@ -1,0 +1,1648 @@
+{
+  "greeting": {
+    "en": [
+      "Hey!",
+      "Hi there.",
+      "Hello!",
+      "Hey, what's up?",
+      "Hi, I'm here.",
+      "Hey hey."
+    ],
+    "zh": [
+      "嘿！",
+      "你好！",
+      "嗨，我在。",
+      "你好呀。",
+      "嗨！"
+    ],
+    "es": [
+      "¡Hola!",
+      "¡Ey!",
+      "Hola, aquí estoy.",
+      "¡Qué tal!"
+    ],
+    "fr": [
+      "Salut !",
+      "Bonjour !",
+      "Coucou !",
+      "Salut, je suis là."
+    ],
+    "pt": [
+      "Oi!",
+      "Olá!",
+      "E aí!",
+      "Oi, tô aqui."
+    ],
+    "ar": [
+      "مرحبا!",
+      "أهلاً!",
+      "هاي!",
+      "مرحبا، أنا هنا."
+    ],
+    "ja": [
+      "やあ！",
+      "こんにちは！",
+      "はい、ここにいます。",
+      "やっほー。"
+    ],
+    "ko": [
+      "안녕!",
+      "안녕하세요!",
+      "네, 여기 있어요.",
+      "하이!"
+    ],
+    "hi": [
+      "हैलो!",
+      "नमस्ते!",
+      "हाय, मैं यहाँ हूँ।",
+      "हैलो हाय!"
+    ],
+    "de": [
+      "Hey!",
+      "Hallo!",
+      "Hi, ich bin da.",
+      "Na, hallo!"
+    ],
+    "it": [
+      "Ciao!",
+      "Ehi!",
+      "Ciao, sono qui.",
+      "Ehilà!"
+    ],
+    "ru": [
+      "Привет!",
+      "Хей!",
+      "Привет, я здесь.",
+      "Здорово!"
+    ]
+  },
+  "ack": {
+    "en": [
+      "Okay.",
+      "Got it.",
+      "On it.",
+      "Sure thing.",
+      "Alright.",
+      "Will do.",
+      "Gotcha.",
+      "Yep, on it.",
+      "Sure, sure.",
+      "Okay okay.",
+      "Ah, got it.",
+      "Ooh, nice.",
+      "Right away."
+    ],
+    "zh": [
+      "好的。",
+      "明白。",
+      "收到。",
+      "没问题。",
+      "马上来。"
+    ],
+    "es": [
+      "Vale.",
+      "Entendido.",
+      "En eso.",
+      "Claro.",
+      "De una."
+    ],
+    "fr": [
+      "D'accord.",
+      "Compris.",
+      "J'y suis.",
+      "Bien sûr.",
+      "Ça marche."
+    ],
+    "pt": [
+      "Ok.",
+      "Entendi.",
+      "Já estou.",
+      "Claro.",
+      "Pode deixar."
+    ],
+    "ar": [
+      "حسناً.",
+      "فهمت.",
+      "سأفعل.",
+      "أكيد.",
+      "تمام."
+    ],
+    "ja": [
+      "はい。",
+      "了解です。",
+      "やってみます。",
+      "もちろん。",
+      "分かりました。"
+    ],
+    "ko": [
+      "네.",
+      "알겠어요.",
+      "할게요.",
+      "물론이죠.",
+      "오케이."
+    ],
+    "hi": [
+      "ठीक है।",
+      "समझ गया।",
+      "करता हूँ।",
+      "ज़रूर।",
+      "हो जाएगा।"
+    ],
+    "de": [
+      "Okay.",
+      "Verstanden.",
+      "Mach ich.",
+      "Klar.",
+      "Alles klar."
+    ],
+    "it": [
+      "Ok.",
+      "Capito.",
+      "Ci sono.",
+      "Certo.",
+      "Va bene."
+    ],
+    "ru": [
+      "Хорошо.",
+      "Понял.",
+      "Сделаю.",
+      "Конечно.",
+      "Принято."
+    ]
+  },
+  "ack_continue": {
+    "en": [
+      "Mm-hmm.",
+      "Gotcha.",
+      "Right.",
+      "Okay.",
+      "Uh-huh.",
+      "Yep.",
+      "I'm with you.",
+      "Following.",
+      "Sure, sure.",
+      "Ahh, right.",
+      "Mmm, go on.",
+      "Ohh, okay.",
+      "I see.",
+      "Keep going."
+    ],
+    "zh": [
+      "嗯嗯。",
+      "明白。",
+      "好。",
+      "对。",
+      "我在听。",
+      "继续。"
+    ],
+    "es": [
+      "Ajá.",
+      "Entendido.",
+      "Claro.",
+      "Sí.",
+      "Te sigo.",
+      "Vale."
+    ],
+    "fr": [
+      "Mmh.",
+      "Compris.",
+      "Ouais.",
+      "D'accord.",
+      "Je suis.",
+      "OK."
+    ],
+    "pt": [
+      "Aham.",
+      "Entendi.",
+      "Certo.",
+      "Sim.",
+      "Tô te ouvindo.",
+      "Beleza."
+    ],
+    "ar": [
+      "أمم.",
+      "فهمت.",
+      "صح.",
+      "حسناً.",
+      "أنا معك.",
+      "تمام."
+    ],
+    "ja": [
+      "うんうん。",
+      "なるほど。",
+      "はい。",
+      "そうですね。",
+      "聞いてます。",
+      "うん。"
+    ],
+    "ko": [
+      "음음.",
+      "알겠어요.",
+      "네네.",
+      "맞아요.",
+      "듣고 있어요.",
+      "응."
+    ],
+    "hi": [
+      "हम्म।",
+      "समझ गया।",
+      "ठीक।",
+      "हाँ।",
+      "सुन रहा हूँ।",
+      "अच्छा।"
+    ],
+    "de": [
+      "Mhm.",
+      "Verstanden.",
+      "Genau.",
+      "Okay.",
+      "Ich hör dir zu.",
+      "Ja."
+    ],
+    "it": [
+      "Mhm.",
+      "Capito.",
+      "Giusto.",
+      "Ok.",
+      "Ti seguo.",
+      "Sì."
+    ],
+    "ru": [
+      "Ммм.",
+      "Понял.",
+      "Точно.",
+      "Хорошо.",
+      "Слушаю.",
+      "Ага."
+    ]
+  },
+  "thinking": {
+    "en": [
+      "Hmm, let me see…",
+      "One sec…",
+      "Let me think about that…",
+      "Hmm, good question…",
+      "Give me a second…",
+      "Let me check…"
+    ],
+    "zh": [
+      "嗯，让我想想……",
+      "稍等……",
+      "让我看一下……",
+      "嗯，好问题……",
+      "等一下……"
+    ],
+    "es": [
+      "Hmm, déjame ver…",
+      "Un segundo…",
+      "Déjame pensar…",
+      "Hmm, buena pregunta…",
+      "Dame un momento…"
+    ],
+    "fr": [
+      "Hmm, laisse-moi voir…",
+      "Une seconde…",
+      "Laisse-moi réfléchir…",
+      "Hmm, bonne question…",
+      "Donne-moi une seconde…"
+    ],
+    "pt": [
+      "Hmm, deixa eu ver…",
+      "Um segundo…",
+      "Deixa eu pensar…",
+      "Hmm, boa pergunta…",
+      "Me dá um momento…"
+    ],
+    "ar": [
+      "همم، دعني أرى…",
+      "ثانية واحدة…",
+      "دعني أفكر…",
+      "همم، سؤال جيد…",
+      "أعطني لحظة…"
+    ],
+    "ja": [
+      "うーん、ちょっと待って…",
+      "少々お待ちを…",
+      "考えさせて…",
+      "うーん、いい質問ですね…",
+      "確認します…"
+    ],
+    "ko": [
+      "음, 잠깐만요…",
+      "잠시만요…",
+      "생각해 볼게요…",
+      "음, 좋은 질문이네요…",
+      "확인해 볼게요…"
+    ],
+    "hi": [
+      "हम्म, देखते हैं…",
+      "एक सेकंड…",
+      "सोचने दीजिए…",
+      "हम्म, अच्छा सवाल…",
+      "एक पल दें…"
+    ],
+    "de": [
+      "Hmm, lass mich sehen…",
+      "Eine Sekunde…",
+      "Lass mich nachdenken…",
+      "Hmm, gute Frage…",
+      "Gib mir einen Moment…"
+    ],
+    "it": [
+      "Hmm, fammi vedere…",
+      "Un secondo…",
+      "Fammi pensare…",
+      "Hmm, bella domanda…",
+      "Dammi un momento…"
+    ],
+    "ru": [
+      "Хм, дай посмотрю…",
+      "Секунду…",
+      "Дай подумать…",
+      "Хм, хороший вопрос…",
+      "Минутку…"
+    ]
+  },
+  "wake": {
+    "en": [
+      "Yes?",
+      "I'm here.",
+      "I'm listening.",
+      "Hey, I'm awake.",
+      "What's up?",
+      "You called?"
+    ],
+    "zh": [
+      "嗯？",
+      "我在。",
+      "我在听。",
+      "嘿，我醒了。",
+      "怎么了？"
+    ],
+    "es": [
+      "¿Sí?",
+      "Aquí estoy.",
+      "Te escucho.",
+      "Ey, desperté.",
+      "¿Qué pasa?"
+    ],
+    "fr": [
+      "Oui ?",
+      "Je suis là.",
+      "Je t'écoute.",
+      "Hé, je suis réveillé.",
+      "Quoi de neuf ?"
+    ],
+    "pt": [
+      "Sim?",
+      "Tô aqui.",
+      "Tô ouvindo.",
+      "Ei, acordei.",
+      "Que foi?"
+    ],
+    "ar": [
+      "نعم؟",
+      "أنا هنا.",
+      "أنا أسمع.",
+      "مرحبا، أنا مستيقظ.",
+      "ما الأمر؟"
+    ],
+    "ja": [
+      "はい？",
+      "ここにいます。",
+      "聞いてますよ。",
+      "はい、起きました。",
+      "どうしました？"
+    ],
+    "ko": [
+      "네?",
+      "여기 있어요.",
+      "듣고 있어요.",
+      "네, 깨어났어요.",
+      "무슨 일이세요?"
+    ],
+    "hi": [
+      "हाँ?",
+      "मैं यहाँ हूँ।",
+      "सुन रहा हूँ।",
+      "मैं जाग गया।",
+      "क्या हुआ?"
+    ],
+    "de": [
+      "Ja?",
+      "Ich bin da.",
+      "Ich höre.",
+      "Hey, ich bin wach.",
+      "Was gibt's?"
+    ],
+    "it": [
+      "Sì?",
+      "Sono qui.",
+      "Ti ascolto.",
+      "Ehi, sono sveglio.",
+      "Che c'è?"
+    ],
+    "ru": [
+      "Да?",
+      "Я здесь.",
+      "Слушаю.",
+      "Хей, я проснулся.",
+      "Что случилось?"
+    ]
+  },
+  "going_to_sleep": {
+    "en": [
+      "Going quiet for a bit.",
+      "I'll be here when you need me.",
+      "Resting my ears — call me when you need me.",
+      "Okay, dozing off. Say my name to wake me."
+    ],
+    "zh": [
+      "我先安静一下。",
+      "需要我时叫我。",
+      "休息一下——叫我名字我就醒。",
+      "好的，眯一会儿。"
+    ],
+    "es": [
+      "Me quedo callado un rato.",
+      "Aquí estaré cuando me necesites.",
+      "Descansando — llámame cuando me necesites."
+    ],
+    "fr": [
+      "Je me tais un moment.",
+      "Je serai là quand tu auras besoin de moi.",
+      "Je me repose — appelle-moi quand tu veux."
+    ],
+    "pt": [
+      "Vou ficar quieto um pouco.",
+      "Tô aqui quando precisar.",
+      "Descansando — me chama quando precisar."
+    ],
+    "ar": [
+      "سأهدأ قليلاً.",
+      "سأكون هنا عندما تحتاجني.",
+      "أرتاح — نادني عندما تحتاجني."
+    ],
+    "ja": [
+      "少し静かにしますね。",
+      "必要なときは呼んでね。",
+      "休憩します——呼べば起きます。"
+    ],
+    "ko": [
+      "잠시 조용히 있을게요.",
+      "필요할 때 불러주세요.",
+      "쉴게요 — 이름 부르면 깨어나요."
+    ],
+    "hi": [
+      "थोड़ा चुप रहता हूँ।",
+      "ज़रूरत हो तो बुलाना।",
+      "आराम कर रहा हूँ — नाम बोलो तो जाग जाऊँगा।"
+    ],
+    "de": [
+      "Ich bin kurz still.",
+      "Ich bin da, wenn du mich brauchst.",
+      "Ruhepause — ruf mich, wenn du mich brauchst."
+    ],
+    "it": [
+      "Sto un po' in silenzio.",
+      "Sarò qui quando avrai bisogno.",
+      "Riposo — chiamami quando vuoi."
+    ],
+    "ru": [
+      "Помолчу немного.",
+      "Я буду здесь, когда понадоблюсь.",
+      "Отдохну — позови, когда нужен."
+    ]
+  },
+  "yes": {
+    "en": [
+      "Yes.",
+      "Yep.",
+      "Absolutely.",
+      "Sounds good.",
+      "Sure.",
+      "You got it."
+    ],
+    "zh": [
+      "是的。",
+      "对。",
+      "当然。",
+      "好啊。",
+      "没问题。"
+    ],
+    "es": [
+      "Sí.",
+      "Claro.",
+      "Por supuesto.",
+      "Suena bien.",
+      "Dale."
+    ],
+    "fr": [
+      "Oui.",
+      "Ouais.",
+      "Absolument.",
+      "Ça me va.",
+      "Bien sûr."
+    ],
+    "pt": [
+      "Sim.",
+      "Aham.",
+      "Com certeza.",
+      "Parece ótimo.",
+      "Claro."
+    ],
+    "ar": [
+      "نعم.",
+      "أكيد.",
+      "بالتأكيد.",
+      "يبدو جيداً.",
+      "طبعاً."
+    ],
+    "ja": [
+      "はい。",
+      "うん。",
+      "もちろん。",
+      "いいですね。",
+      "いいよ。"
+    ],
+    "ko": [
+      "네.",
+      "응.",
+      "물론이죠.",
+      "좋아요.",
+      "그럼요."
+    ],
+    "hi": [
+      "हाँ।",
+      "ज़रूर।",
+      "बिल्कुल।",
+      "अच्छा लगेगा।",
+      "ठीक है।"
+    ],
+    "de": [
+      "Ja.",
+      "Jap.",
+      "Klar.",
+      "Klingt gut.",
+      "Gerne."
+    ],
+    "it": [
+      "Sì.",
+      "Certo.",
+      "Assolutamente.",
+      "Mi sta bene.",
+      "Volentieri."
+    ],
+    "ru": [
+      "Да.",
+      "Ага.",
+      "Конечно.",
+      "Звучит хорошо.",
+      "Запросто."
+    ]
+  },
+  "no": {
+    "en": [
+      "No.",
+      "Hmm, not quite.",
+      "Not yet.",
+      "I don't think so.",
+      "Afraid not."
+    ],
+    "zh": [
+      "不行。",
+      "嗯，不太对。",
+      "还没有。",
+      "我觉得不行。",
+      "恐怕不行。"
+    ],
+    "es": [
+      "No.",
+      "Hmm, no exactamente.",
+      "Todavía no.",
+      "No lo creo.",
+      "Me temo que no."
+    ],
+    "fr": [
+      "Non.",
+      "Hmm, pas vraiment.",
+      "Pas encore.",
+      "Je ne crois pas.",
+      "J'ai peur que non."
+    ],
+    "pt": [
+      "Não.",
+      "Hmm, não exatamente.",
+      "Ainda não.",
+      "Acho que não.",
+      "Infelizmente não."
+    ],
+    "ar": [
+      "لا.",
+      "همم، ليس تماماً.",
+      "ليس بعد.",
+      "لا أعتقد ذلك.",
+      "للأسف لا."
+    ],
+    "ja": [
+      "いいえ。",
+      "うーん、違います。",
+      "まだです。",
+      "そう思いません。",
+      "残念ながら。"
+    ],
+    "ko": [
+      "아니요.",
+      "음, 아닌 것 같아요.",
+      "아직요.",
+      "그렇지 않은 것 같아요.",
+      "아쉽게도 아니에요."
+    ],
+    "hi": [
+      "नहीं।",
+      "हम्म, ठीक नहीं।",
+      "अभी नहीं।",
+      "मुझे नहीं लगता।",
+      "डर है कि नहीं।"
+    ],
+    "de": [
+      "Nein.",
+      "Hmm, nicht ganz.",
+      "Noch nicht.",
+      "Glaube nicht.",
+      "Leider nicht."
+    ],
+    "it": [
+      "No.",
+      "Hmm, non proprio.",
+      "Non ancora.",
+      "Non credo.",
+      "Temo di no."
+    ],
+    "ru": [
+      "Нет.",
+      "Хм, не совсем.",
+      "Пока нет.",
+      "Не думаю.",
+      "Боюсь, что нет."
+    ]
+  },
+  "backchannel": {
+    "en": [
+      "Mm-hmm.",
+      "Uh-huh.",
+      "Right.",
+      "I hear you.",
+      "Go on.",
+      "Makes sense.",
+      "Mm.",
+      "Sure, sure.",
+      "Ahh.",
+      "Ooh.",
+      "Right, right.",
+      "Mmm, yeah.",
+      "Ah, okay."
+    ],
+    "zh": [
+      "嗯嗯。",
+      "嗯。",
+      "对。",
+      "我在听。",
+      "继续说。",
+      "有道理。"
+    ],
+    "es": [
+      "Ajá.",
+      "Mmm.",
+      "Claro.",
+      "Te escucho.",
+      "Sigue.",
+      "Tiene sentido."
+    ],
+    "fr": [
+      "Mmh.",
+      "Ouais.",
+      "Exact.",
+      "Je t'écoute.",
+      "Continue.",
+      "Logique."
+    ],
+    "pt": [
+      "Aham.",
+      "Mmm.",
+      "Certo.",
+      "Te escuto.",
+      "Continua.",
+      "Faz sentido."
+    ],
+    "ar": [
+      "أمم.",
+      "آه.",
+      "صحيح.",
+      "أسمعك.",
+      "أكمل.",
+      "منطقي."
+    ],
+    "ja": [
+      "うんうん。",
+      "うん。",
+      "なるほど。",
+      "聞いてるよ。",
+      "続けて。",
+      "納得。"
+    ],
+    "ko": [
+      "음음.",
+      "음.",
+      "맞아요.",
+      "듣고 있어요.",
+      "계속해요.",
+      "말이 돼요."
+    ],
+    "hi": [
+      "हम्म।",
+      "हाँ।",
+      "सही।",
+      "सुन रहा हूँ।",
+      "बोलते जाओ।",
+      "समझ में आया।"
+    ],
+    "de": [
+      "Mhm.",
+      "Aha.",
+      "Stimmt.",
+      "Ich höre zu.",
+      "Erzähl weiter.",
+      "Leuchtet ein."
+    ],
+    "it": [
+      "Mhm.",
+      "Già.",
+      "Giusto.",
+      "Ti ascolto.",
+      "Vai avanti.",
+      "Ha senso."
+    ],
+    "ru": [
+      "Ммм.",
+      "Ага.",
+      "Верно.",
+      "Слушаю.",
+      "Продолжай.",
+      "Логично."
+    ]
+  },
+  "done": {
+    "en": [
+      "All set.",
+      "Done.",
+      "Finished.",
+      "That's done.",
+      "All taken care of."
+    ],
+    "zh": [
+      "搞定。",
+      "完成了。",
+      "做好了。",
+      "都处理好了。"
+    ],
+    "es": [
+      "Listo.",
+      "Hecho.",
+      "Terminado.",
+      "Todo listo."
+    ],
+    "fr": [
+      "C'est fait.",
+      "Terminé.",
+      "Fini.",
+      "Tout est réglé."
+    ],
+    "pt": [
+      "Pronto.",
+      "Feito.",
+      "Terminei.",
+      "Tudo resolvido."
+    ],
+    "ar": [
+      "تم.",
+      "انتهى.",
+      "خلصت.",
+      "كل شيء جاهز."
+    ],
+    "ja": [
+      "できました。",
+      "完了です。",
+      "終わりました。",
+      "全部片付きました。"
+    ],
+    "ko": [
+      "다 됐어요.",
+      "완료됐어요.",
+      "끝났어요.",
+      "다 처리했어요."
+    ],
+    "hi": [
+      "हो गया।",
+      "पूरा हुआ।",
+      "खत्म।",
+      "सब हो गया।"
+    ],
+    "de": [
+      "Erledigt.",
+      "Fertig.",
+      "Geschafft.",
+      "Alles erledigt."
+    ],
+    "it": [
+      "Fatto.",
+      "Finito.",
+      "Ci siamo.",
+      "Tutto a posto."
+    ],
+    "ru": [
+      "Готово.",
+      "Сделано.",
+      "Закончил.",
+      "Всё улажено."
+    ]
+  },
+  "reactive_positive": {
+    "en": [
+      "Oh nice!",
+      "That's great.",
+      "Love it.",
+      "Oh, that's awesome.",
+      "Nice!"
+    ],
+    "zh": [
+      "哦，不错！",
+      "太好了。",
+      "太棒了。",
+      "哇，很好！"
+    ],
+    "es": [
+      "¡Qué bien!",
+      "Genial.",
+      "Me encanta.",
+      "¡Oh, qué bueno!"
+    ],
+    "fr": [
+      "Oh, sympa !",
+      "Génial.",
+      "J'adore.",
+      "Oh, super !"
+    ],
+    "pt": [
+      "Oh, legal!",
+      "Que ótimo.",
+      "Adorei.",
+      "Oh, demais!"
+    ],
+    "ar": [
+      "رائع!",
+      "هذا جميل.",
+      "ممتاز.",
+      "واو، رائع!"
+    ],
+    "ja": [
+      "お、いいね！",
+      "すごい。",
+      "最高だね。",
+      "おお、素敵！"
+    ],
+    "ko": [
+      "오, 좋아요!",
+      "대박.",
+      "멋진데요.",
+      "오, 완전 좋아!"
+    ],
+    "hi": [
+      "अरे वाह!",
+      "बढ़िया।",
+      "बहुत अच्छा।",
+      "वाह, शानदार!"
+    ],
+    "de": [
+      "Oh, schön!",
+      "Super.",
+      "Cool.",
+      "Oh, klasse!"
+    ],
+    "it": [
+      "Oh, bello!",
+      "Fantastico.",
+      "Adoro.",
+      "Oh, ottimo!"
+    ],
+    "ru": [
+      "О, здорово!",
+      "Отлично.",
+      "Класс.",
+      "О, супер!"
+    ]
+  },
+  "reactive_negative": {
+    "en": [
+      "Oh no.",
+      "That's rough.",
+      "Ugh, sorry.",
+      "Hmm, that's annoying.",
+      "Oh, that sucks."
+    ],
+    "zh": [
+      "哦不。",
+      "那太糟了。",
+      "唉，抱歉。",
+      "嗯，真烦人。"
+    ],
+    "es": [
+      "Oh no.",
+      "Qué mal.",
+      "Uf, lo siento.",
+      "Hmm, qué fastidio."
+    ],
+    "fr": [
+      "Oh non.",
+      "C'est dur.",
+      "Ouf, désolé.",
+      "Hmm, c'est embêtant."
+    ],
+    "pt": [
+      "Ah não.",
+      "Que chato.",
+      "Poxa, desculpa.",
+      "Hmm, que droga."
+    ],
+    "ar": [
+      "أوه لا.",
+      "هذا صعب.",
+      "آسف.",
+      "همم، هذا مزعج."
+    ],
+    "ja": [
+      "あらら。",
+      "それは大変だ。",
+      "うわ、残念。",
+      "うーん、それは嫌だね。"
+    ],
+    "ko": [
+      "어머.",
+      "안 됐네요.",
+      "아이고, 미안해요.",
+      "음, 짜증나겠다."
+    ],
+    "hi": [
+      "अरे नहीं।",
+      "बुरा हुआ।",
+      "उफ़, माफ़ी।",
+      "हम्म, परेशानी है।"
+    ],
+    "de": [
+      "Oh nein.",
+      "Das ist mies.",
+      "Uff, sorry.",
+      "Hmm, ärgerlich."
+    ],
+    "it": [
+      "Oh no.",
+      "Che peccato.",
+      "Uffa, mi dispiace.",
+      "Hmm, che seccatura."
+    ],
+    "ru": [
+      "Ой нет.",
+      "Жаль.",
+      "Ух, извини.",
+      "Хм, неприятно."
+    ]
+  },
+  "laugh_light": {
+    "en": [
+      "Ha!",
+      "Heh.",
+      "Haha, nice.",
+      "Heh, fair enough.",
+      "Ha, good one."
+    ],
+    "zh": [
+      "哈哈！",
+      "嘿。",
+      "哈哈，不错。",
+      "呵呵，有道理。"
+    ],
+    "es": [
+      "¡Ja!",
+      "Jeje.",
+      "Jaja, buena.",
+      "Je, vale."
+    ],
+    "fr": [
+      "Ha !",
+      "Hé.",
+      "Haha, pas mal.",
+      "Hé, bien vu."
+    ],
+    "pt": [
+      "Haha!",
+      "Hehe.",
+      "Haha, boa.",
+      "He, justo."
+    ],
+    "ar": [
+      "هاها!",
+      "ههه.",
+      "هاها، جميل.",
+      "هه، عادل."
+    ],
+    "ja": [
+      "はは！",
+      "ふふ。",
+      "あはは、いいね。",
+      "へへ、確かに。"
+    ],
+    "ko": [
+      "하하!",
+      "헤헤.",
+      "하하, 좋네요.",
+      "헤, 인정."
+    ],
+    "hi": [
+      "हाहा!",
+      "हेहे।",
+      "हाहा, अच्छा।",
+      "हे, ठीक है।"
+    ],
+    "de": [
+      "Ha!",
+      "Hehe.",
+      "Haha, nicht schlecht.",
+      "He, fair enough."
+    ],
+    "it": [
+      "Ah!",
+      "Eheh.",
+      "Ahah, niente male.",
+      "Ehe, giusto."
+    ],
+    "ru": [
+      "Ха-ха!",
+      "Хех.",
+      "Хаха, неплохо.",
+      "Хе, справедливо."
+    ]
+  },
+  "clarify": {
+    "en": [
+      "Sorry, say that again?",
+      "Hmm, didn't catch that.",
+      "Could you repeat that?",
+      "What was that?",
+      "Say that once more?"
+    ],
+    "zh": [
+      "抱歉，能再说一遍吗？",
+      "嗯，没听清。",
+      "可以重复一下吗？",
+      "刚才说什么？"
+    ],
+    "es": [
+      "Perdón, ¿lo repites?",
+      "Hmm, no lo pillé.",
+      "¿Puedes repetirlo?",
+      "¿Qué dijiste?"
+    ],
+    "fr": [
+      "Pardon, tu peux répéter ?",
+      "Hmm, je n'ai pas capté.",
+      "Tu peux redire ?",
+      "C'était quoi ?"
+    ],
+    "pt": [
+      "Foi mal, repete?",
+      "Hmm, não entendi.",
+      "Pode repetir?",
+      "Como é?"
+    ],
+    "ar": [
+      "عذراً، كرر ذلك؟",
+      "همم، لم أسمع.",
+      "هل يمكنك التكرار؟",
+      "ماذا قلت؟"
+    ],
+    "ja": [
+      "ごめん、もう一回？",
+      "うーん、聞き取れなかった。",
+      "繰り返してもらえる？",
+      "今なんて？"
+    ],
+    "ko": [
+      "미안, 다시 말해줄래?",
+      "음, 못 들었어요.",
+      "다시 말해 주실래요?",
+      "뭐라고요?"
+    ],
+    "hi": [
+      "सॉरी, फिर से बोलो?",
+      "हम्म, सुनाई नहीं दिया।",
+      "दोहरा सकते हो?",
+      "क्या कहा?"
+    ],
+    "de": [
+      "Sorry, nochmal?",
+      "Hmm, nicht verstanden.",
+      "Kannst du das wiederholen?",
+      "Wie bitte?"
+    ],
+    "it": [
+      "Scusa, ripeti?",
+      "Hmm, non ho capito.",
+      "Puoi ripetere?",
+      "Cosa hai detto?"
+    ],
+    "ru": [
+      "Прости, повтори?",
+      "Хм, не расслышал.",
+      "Можешь повторить?",
+      "Что ты сказал?"
+    ]
+  },
+  "intent_memory_store": {
+    "en": [
+      "I'll remember that.",
+      "Saving that.",
+      "Got it — noted.",
+      "Storing that now.",
+      "Noted — I won't forget."
+    ],
+    "zh": [
+      "我记住了。",
+      "正在保存。",
+      "好的——记下了。",
+      "存好了。"
+    ],
+    "es": [
+      "Lo recordaré.",
+      "Guardándolo.",
+      "Entendido — anotado.",
+      "Lo guardo ahora."
+    ],
+    "fr": [
+      "Je m'en souviendrai.",
+      "Je le note.",
+      "Compris — noté.",
+      "Je l'enregistre."
+    ],
+    "pt": [
+      "Vou lembrar disso.",
+      "Salvando.",
+      "Entendi — anotado.",
+      "Guardando agora."
+    ],
+    "ar": [
+      "سأتذكر ذلك.",
+      "جارٍ الحفظ.",
+      "فهمت — سجلته.",
+      "أحفظه الآن."
+    ],
+    "ja": [
+      "覚えておきます。",
+      "保存します。",
+      "了解——メモしました。",
+      "記録しますね。"
+    ],
+    "ko": [
+      "기억할게요.",
+      "저장 중이에요.",
+      "알겠어요 — 메모했어요.",
+      "지금 저장해요."
+    ],
+    "hi": [
+      "याद रखूँगा।",
+      "सेव कर रहा हूँ।",
+      "ठीक — नोट कर लिया।",
+      "अभी स्टोर करता हूँ।"
+    ],
+    "de": [
+      "Das merke ich mir.",
+      "Speichere das.",
+      "Verstanden — notiert.",
+      "Ich speichere das jetzt."
+    ],
+    "it": [
+      "Me lo ricorderò.",
+      "Lo salvo.",
+      "Capito — annotato.",
+      "Lo memorizzo adesso."
+    ],
+    "ru": [
+      "Запомню.",
+      "Сохраняю.",
+      "Понял — записал.",
+      "Сейчас сохраню."
+    ]
+  },
+  "intent_command_automate": {
+    "en": [
+      "Working on it.",
+      "I'll take care of that.",
+      "On it — give me a moment.",
+      "Handling that now.",
+      "Let me get that done."
+    ],
+    "zh": [
+      "正在处理。",
+      "交给我吧。",
+      "马上办——稍等。",
+      "现在处理中。"
+    ],
+    "es": [
+      "Trabajando en eso.",
+      "Me encargo.",
+      "En eso — dame un momento.",
+      "Lo estoy haciendo."
+    ],
+    "fr": [
+      "J'y travaille.",
+      "Je m'en occupe.",
+      "C'est parti — une seconde.",
+      "Je gère ça."
+    ],
+    "pt": [
+      "Trabalhando nisso.",
+      "Deixa comigo.",
+      "Já estou — me dá um momento.",
+      "Resolvendo agora."
+    ],
+    "ar": [
+      "أعمل عليه.",
+      "سأتولى ذلك.",
+      "عليه — لحظة.",
+      "أنفذه الآن."
+    ],
+    "ja": [
+      "取りかかっています。",
+      "やっておきます。",
+      "今やってます——少々。",
+      "処理中です。"
+    ],
+    "ko": [
+      "작업 중이에요.",
+      "제가 처리할게요.",
+      "하고 있어요 — 잠깐만요.",
+      "지금 처리 중이에요."
+    ],
+    "hi": [
+      "कर रहा हूँ।",
+      "मैं संभाल लूँगा।",
+      "हो रहा है — एक पल।",
+      "अभी कर रहा हूँ।"
+    ],
+    "de": [
+      "Arbeite dran.",
+      "Ich kümmere mich drum.",
+      "Bin dran — einen Moment.",
+      "Wird erledigt."
+    ],
+    "it": [
+      "Ci sto lavorando.",
+      "Ci penso io.",
+      "Subito — un attimo.",
+      "Lo sto facendo ora."
+    ],
+    "ru": [
+      "Работаю над этим.",
+      "Я это сделаю.",
+      "Уже делаю — момент.",
+      "Выполняю."
+    ]
+  },
+  "intent_general_knowledge": {
+    "en": [
+      "Let me think about that.",
+      "Hmm, good question.",
+      "Let me recall what I know.",
+      "Thinking…",
+      "Let me figure that out."
+    ],
+    "zh": [
+      "让我想想。",
+      "嗯，好问题。",
+      "让我回忆一下。",
+      "想一下……"
+    ],
+    "es": [
+      "Déjame pensar.",
+      "Hmm, buena pregunta.",
+      "Déjame recordar.",
+      "Pensando…"
+    ],
+    "fr": [
+      "Laisse-moi réfléchir.",
+      "Hmm, bonne question.",
+      "Laisse-moi me rappeler.",
+      "Je réfléchis…"
+    ],
+    "pt": [
+      "Deixa eu pensar.",
+      "Hmm, boa pergunta.",
+      "Deixa eu lembrar.",
+      "Pensando…"
+    ],
+    "ar": [
+      "دعني أفكر.",
+      "همم، سؤال جيد.",
+      "دعني أتذكر.",
+      "أفكر…"
+    ],
+    "ja": [
+      "考えさせて。",
+      "うーん、いい質問。",
+      "思い出してみます。",
+      "考え中…"
+    ],
+    "ko": [
+      "생각해 볼게요.",
+      "음, 좋은 질문이에요.",
+      "기억해 볼게요.",
+      "생각 중…"
+    ],
+    "hi": [
+      "सोचने दीजिए।",
+      "हम्म, अच्छा सवाल।",
+      "याद करने दीजिए।",
+      "सोच रहा हूँ…"
+    ],
+    "de": [
+      "Lass mich nachdenken.",
+      "Hmm, gute Frage.",
+      "Lass mich überlegen.",
+      "Denke nach…"
+    ],
+    "it": [
+      "Fammi pensare.",
+      "Hmm, bella domanda.",
+      "Fammi ricordare.",
+      "Ci penso…"
+    ],
+    "ru": [
+      "Дай подумать.",
+      "Хм, хороший вопрос.",
+      "Дай вспомнить.",
+      "Думаю…"
+    ]
+  },
+  "humming": {
+    "en": [
+      "Hmm hm hmm~",
+      "Mmm hmm hmm~",
+      "Hmm~ mmm~",
+      "Hmmm hmm~",
+      "Mmm hmm~"
+    ],
+    "zh": [
+      "嗯哼嗯哼~",
+      "哼哼~",
+      "嗯~嗯哼~",
+      "哼哼哼~"
+    ],
+    "es": [
+      "Mmm hmm hmm~",
+      "Tarará~",
+      "Hmm mmm~",
+      "Mmm~ hmm~"
+    ],
+    "fr": [
+      "Hmm hmm hmm~",
+      "Mmm hmm~",
+      "Hmm~ mmm~",
+      "Hm hm hm~"
+    ],
+    "pt": [
+      "Hmm hmm~",
+      "Mmm hmm hmm~",
+      "Hum hum hum~",
+      "Mmm~"
+    ],
+    "ar": [
+      "هم هم هم~",
+      "مم همم~",
+      "هم~ همم~"
+    ],
+    "ja": [
+      "ふんふんふん〜",
+      "ん〜んふん〜",
+      "ふふん〜",
+      "んふんふん〜"
+    ],
+    "ko": [
+      "흥흥흥~",
+      "음흠음~",
+      "흠흠~ 흥~"
+    ],
+    "hi": [
+      "ह्म्म ह्म्म~",
+      "ह्म्म~ ह्म्म ह्म्म~",
+      "म्म ह्म्म~"
+    ],
+    "de": [
+      "Hmm hm hmm~",
+      "Mmm hmm~",
+      "Hmm~ hmm hmm~"
+    ],
+    "it": [
+      "Hmm hmm hmm~",
+      "Mmm hmm~",
+      "Hmm~ mmm~"
+    ],
+    "ru": [
+      "Ммм хмм хмм~",
+      "Хмм хмм~",
+      "Мм~ ммм~"
+    ]
+  },
+  "sigh": {
+    "en": [
+      "Ahh...",
+      "Hmm... ahh...",
+      "Phew...",
+      "Mmm..."
+    ],
+    "zh": [
+      "啊……",
+      "唉……嗯……",
+      "呼……",
+      "嗯……哈……"
+    ],
+    "es": [
+      "Ah...",
+      "Mmm... ah...",
+      "Uf...",
+      "Ay..."
+    ],
+    "fr": [
+      "Ah...",
+      "Mmm... ah...",
+      "Ouf..."
+    ],
+    "pt": [
+      "Ah...",
+      "Mmm...",
+      "Ufa..."
+    ],
+    "ar": [
+      "آه……",
+      "همم…… آه……",
+      "أوف……"
+    ],
+    "ja": [
+      "ああ……",
+      "ふう……",
+      "ん……ああ……"
+    ],
+    "ko": [
+      "아……",
+      "후우……",
+      "음……"
+    ],
+    "hi": [
+      "आह……",
+      "उफ़……",
+      "ह्म्म……"
+    ],
+    "de": [
+      "Ah...",
+      "Mmm... ah...",
+      "Puh..."
+    ],
+    "it": [
+      "Ah...",
+      "Mmm... ah...",
+      "Uff..."
+    ],
+    "ru": [
+      "Ах……",
+      "Фух……",
+      "Ммм……"
+    ]
+  },
+  "singing": {
+    "en": [
+      "La la la~",
+      "La la la la~",
+      "Dum di dum~",
+      "La la la, hmm~",
+      "La la~"
+    ],
+    "zh": [
+      "啦啦啦~",
+      "啦啦啦啦~",
+      "啦~啦啦~"
+    ],
+    "es": [
+      "La la la~",
+      "Lara la la~",
+      "Tarará rará~",
+      "La la~"
+    ],
+    "fr": [
+      "La la la~",
+      "La la la la~",
+      "Tralala~",
+      "La la~"
+    ],
+    "pt": [
+      "La la la~",
+      "Lalala~",
+      "La la la la~"
+    ],
+    "ar": [
+      "لا لا لا~",
+      "لالالا~"
+    ],
+    "ja": [
+      "ラララ〜",
+      "ララララ〜",
+      "ランランラン〜"
+    ],
+    "ko": [
+      "라라라~",
+      "랄랄라~",
+      "라라라라~"
+    ],
+    "hi": [
+      "ला ला ला~",
+      "लालाला~"
+    ],
+    "de": [
+      "La la la~",
+      "Lalalala~",
+      "Tralala~"
+    ],
+    "it": [
+      "La la la~",
+      "Lalala~",
+      "La la la la~"
+    ],
+    "ru": [
+      "Ла ла ла~",
+      "Лалала~",
+      "Ла ла ла ла~"
+    ]
+  },
+  "breath": {
+    "en": [
+      "Mmm...",
+      "Hmm...",
+      "ahh..."
+    ],
+    "zh": [
+      "嗯……",
+      "呼……",
+      "哈……"
+    ],
+    "es": [
+      "Mmm...",
+      "Hmm...",
+      "Ah..."
+    ],
+    "fr": [
+      "Mmm...",
+      "Hmm...",
+      "Ah..."
+    ],
+    "pt": [
+      "Mmm...",
+      "Hmm..."
+    ],
+    "ar": [
+      "ممم……",
+      "همم……"
+    ],
+    "ja": [
+      "ん……",
+      "ふう……"
+    ],
+    "ko": [
+      "음……",
+      "후……"
+    ],
+    "hi": [
+      "ह्म्म……",
+      "आह……"
+    ],
+    "de": [
+      "Mmm...",
+      "Hmm...",
+      "Ah..."
+    ],
+    "it": [
+      "Mmm...",
+      "Hmm..."
+    ],
+    "ru": [
+      "Ммм……",
+      "Хмм……"
+    ]
+  }
+}

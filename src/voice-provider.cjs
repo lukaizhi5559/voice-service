@@ -41,8 +41,14 @@ let humeEvi = null;
 try { humeEvi = require('./deprecated/providers/hume-evi.cjs'); } catch (_) {}
 
 // ── Fallback chain ────────────────────────────────────────────────────────────
-// openai (gpt-4o-mini-tts, ChatGPT voices) → cartesia → inworld → groq → macos
-const FALLBACK_CHAIN = ['openai', 'cartesia', 'inworld', 'groq', 'macos'];
+// openai (gpt-4o-mini-tts, ChatGPT voices) → cartesia → resemble → inworld.
+// Robotic providers (groq→macos say, macos) are NEVER auto-selected — if all
+// quality providers fail, callers get an error → response stays text-only.
+// VOICE_ALLOW_SYSTEM_VOICE=1 re-adds them for offline debugging.
+const QUALITY_CHAIN = ['openai', 'cartesia', 'resemble', 'inworld'];
+const FALLBACK_CHAIN = process.env.VOICE_ALLOW_SYSTEM_VOICE === '1'
+  ? [...QUALITY_CHAIN, 'groq', 'macos']
+  : QUALITY_CHAIN;
 
 const PROVIDER_MAP = {
   openai:     openaiTts,
@@ -104,7 +110,7 @@ function _selectProvider() {
     logger.warn(`[VoiceProvider] Requested provider "${requested}" is unavailable — falling back`);
   }
 
-  // Auto-select: walk the fallback chain
+  // Auto-select: walk the quality chain (never robotic providers)
   for (const name of FALLBACK_CHAIN) {
     const p = PROVIDER_MAP[name];
     if (p && p.isAvailable()) {
@@ -113,13 +119,14 @@ function _selectProvider() {
     }
   }
 
-  // Should never reach here — macOS is always available on macOS
-  logger.error('[VoiceProvider] No voice provider available!');
-  return { name: 'macos', provider: macosNative };
+  // No quality provider available — 'none' means every synthesize() call
+  // throws and responses degrade to text-only (never robotic audio).
+  logger.error('[VoiceProvider] No quality voice provider available — TTS disabled (text-only)');
+  return { name: 'none', provider: null };
 }
 
 function _ensureProvider() {
-  if (!_activeProvider) {
+  if (_activeProviderName === null) {
     const { name, provider } = _selectProvider();
     _activeProviderName = name;
     _activeProvider     = provider;
@@ -169,10 +176,11 @@ function setProvider(name) {
  * List all providers and their availability status.
  */
 function listProviders() {
-  return FALLBACK_CHAIN.map(name => ({
+  return Object.keys(PROVIDER_MAP).map(name => ({
     name,
     active: name === getProviderName(),
     available: PROVIDER_MAP[name]?.isAvailable() ?? false,
+    quality: QUALITY_CHAIN.includes(name),
   }));
 }
 
@@ -252,12 +260,13 @@ async function eviProcessAudio(args) {
 
 function _buildFallbackChain(capability) {
   const { name: activeName } = _ensureProvider();
-  // Start from active provider, then walk remaining fallback chain
+  // Start from active provider, then walk remaining fallback chain.
+  // An explicit provider not in the chain (e.g. resemble, or macos when the
+  // user deliberately chose it) still leads, followed by the quality chain.
   const activeIdx = FALLBACK_CHAIN.indexOf(activeName);
-  const orderedNames = [
-    ...FALLBACK_CHAIN.slice(activeIdx),
-    ...FALLBACK_CHAIN.slice(0, activeIdx),
-  ];
+  const orderedNames = activeIdx === -1
+    ? [activeName, ...FALLBACK_CHAIN]
+    : [...FALLBACK_CHAIN.slice(activeIdx), ...FALLBACK_CHAIN.slice(0, activeIdx)];
   return orderedNames
     .map(name => ({ name, provider: PROVIDER_MAP[name] }))
     .filter(({ provider }) => provider && provider.isAvailable());

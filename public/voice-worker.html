@@ -25,8 +25,12 @@
  *   - webkitSpeechRecognition → stream {interim,final,state,error} over WS
  *   - Receive {audio-begin, <binary frames>, audio-end} → decode + play TTS
  *   - Receive {speak} → speechSynthesis fallback
- *   - Barge-in: new speech while speaking → cancel playback, keep listening
+ *   - Echo guard: abort() (not stop()) before playback, results gated while
+ *     speaking + a short post-playback window, delayed restart — stops the
+ *     mic hearing our own TTS and re-submitting it as user speech.
  *   - Optional mic level meter (?level=0 disables) for overlay voice bars
+ *   - ?duplex=1: while speaking, interims are forwarded tagged
+ *     {duringSpeech:true} for server-side barge-in decisions.
  *
  * The page has NO user gesture — audio autoplay relies on
  * --autoplay-policy=no-user-gesture-required (set by the driver).
@@ -36,6 +40,9 @@ const params = new URLSearchParams(location.search);
 const WS_URL = params.get('ws') || `ws://${location.host}/voice.ws`;
 const LANG = params.get('lang') || navigator.language || 'en-US';
 const LEVEL_METER = params.get('level') !== '0';
+const DUPLEX = params.get('duplex') !== '0'; // barge-in on by default (?duplex=0 opts out)
+const SINK = params.get('sink') || ''; // 'auto-headphones' or an audiooutput deviceId
+const MIC_PIN = params.get('mic') || ''; // label substring pins the realtime mic
 
 const stateEl = document.getElementById('state');
 const logEl = document.getElementById('log');
@@ -95,9 +102,15 @@ function handleCommand(msg) {
       if (sessionActive) startListening(); else stopListening();
       break;
     case 'audio-begin':
+      // Gate recognition BEFORE the first audio byte is even decoded —
+      // TTS starts reaching the mic only after this, so any result that
+      // races in from now on is suspect.
       pendingAudio = [];
       audioFormat = msg.format || 'wav';
-      interruptPlayback();
+      stopAudio();
+      speaking = true;
+      suppressUntil = Date.now() + 30000; // generous bound; tightened on play end
+      try { recognition && recognition.abort(); } catch (_) {}
       break;
     case 'audio-end':
       playBufferedAudio();
@@ -105,8 +118,34 @@ function handleCommand(msg) {
     case 'speak': // speechSynthesis fallback
       speakFallback(msg.text, msg.lang);
       break;
+    case 'filler-play': // pre-generated filler clip — same gated playback path
+      playFiller(msg.src);
+      break;
+    case 'filler-preload': // warm the decode cache (session start / regen)
+      preloadFillers(msg.urls || []);
+      break;
     case 'stop': // barge-in / abort playback
       interruptPlayback();
+      break;
+    case 'sleep': // server-level sleep state — SR stays alive, server drops non-wake finals
+      setState(msg.active ? 'sleeping' : (wantListening ? 'listening' : 'idle'));
+      break;
+    case 'realtime': // S2S Talk Mode: {active:true} start, {active:false} stop
+      if (msg.active) startRealtime().catch(e => {
+        log(`realtime start failed: ${e.message}`);
+        stopRealtime(); // restores SR if wantListening — pipeline takes over
+        send({type:'error', error:'realtime-start-failed', detail: String(e.message || e)});
+      });
+      else stopRealtime();
+      break;
+    case 'rt-tool-result': // server resolved a function call → feed back to model
+      rtToolResult(msg.call_id, msg.output);
+      break;
+    case 'rt-inject': // server-side context/thought/task-result → model speaks it
+      rtInject(msg.text);
+      break;
+    case 'rt-context': // silent live-context refresh — context item, no response
+      rtContextUpdate(msg.text);
       break;
     case 'ping':
       send({ type: 'pong' });
@@ -119,7 +158,22 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let wantListening = false;
 let speaking = false;
+let suppressUntil = 0;        // results are dropped while speaking or before this ts
+let restartTimer = null;
+const RESTART_DELAY_MS = 500; // let speaker ring / room reverb die before re-arming
 let currentLang = LANG;
+let rtActive = false;         // realtime owns the mic — SR stays parked
+
+function suppressed() { return speaking || Date.now() < suppressUntil; }
+
+function scheduleRestart() {
+  clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    if (wantListening && !speaking && !rtActive) {
+      try { recognition.start(); } catch (_) {}
+    }
+  }, RESTART_DELAY_MS);
+}
 
 if (SR) {
   recognition = new SR();
@@ -128,11 +182,14 @@ if (SR) {
   recognition.lang = LANG;
 
   recognition.onresult = (ev) => {
+    if (!wantListening || rtActive) return; // drain after stop, or realtime owns the mic — discard
+    const isSuppressed = suppressed();
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
       const text = res[0].transcript;
       if (res.isFinal) {
+        if (isSuppressed) { log(`dropped final (suppressed): ${text}`); continue; }
         const lang = detectScriptLang(text) || currentLang;
         log(`final: ${text}`);
         send({ type: 'final', text: text.trim(), lang });
@@ -141,9 +198,13 @@ if (SR) {
       }
     }
     if (interim) {
-      // Barge-in: user talking while TTS plays → kill playback.
-      if (speaking) interruptPlayback();
-      send({ type: 'interim', text: interim.trim(), lang: currentLang });
+      if (isSuppressed) {
+        // Duplex mode: forward tagged interims so the server can decide
+        // barge-in vs. our own TTS echo — never auto-interrupt client-side.
+        if (DUPLEX) send({ type: 'interim', text: interim.trim(), lang: currentLang, duringSpeech: true });
+      } else {
+        send({ type: 'interim', text: interim.trim(), lang: currentLang });
+      }
     }
   };
   recognition.onerror = (ev) => {
@@ -156,15 +217,19 @@ if (SR) {
   };
   recognition.onend = () => {
     // Chrome stops recognition on silence — keep it alive while wanted.
-    if (wantListening && !speaking) {
-      try { recognition.start(); } catch (_) {}
-    } else if (wantListening && speaking) {
-      // restarted when playback ends
-    } else {
-      setState('idle');
-    }
+    if (!wantListening) { setState('idle'); return; }
+    if (rtActive) return;              // realtime owns the mic — stay parked
+    if (speaking) return;              // restarted at speak end
+    if (Date.now() < suppressUntil) { scheduleRestart(); return; }
+    try { recognition.start(); } catch (_) {}
   };
-  recognition.onstart = () => setState('listening');
+  recognition.onstart = () => { if (!rtActive) setState('listening'); };
+  // Pause / speech-boundary signals — the server's filler policy uses these
+  // for backchannel placement (transition-relevance places) and aggregation.
+  recognition.onspeechstart = () => { if (!rtActive) send({ type: 'speech-event', event: 'speech-start' }); };
+  recognition.onspeechend   = () => { if (!rtActive) send({ type: 'speech-event', event: 'speech-end' }); };
+  recognition.onsoundstart  = () => { if (!rtActive) send({ type: 'speech-event', event: 'sound-start' }); };
+  recognition.onsoundend    = () => { if (!rtActive) send({ type: 'speech-event', event: 'sound-end' }); };
 } else {
   send({ type: 'error', error: 'speech-recognition-unsupported' });
   stateEl.textContent = 'SpeechRecognition unsupported';
@@ -173,7 +238,7 @@ if (SR) {
 function startListening() {
   if (!recognition) return;
   wantListening = true;
-  if (!speaking) {
+  if (!suppressed() && !rtActive) {
     try { recognition.start(); } catch (_) {}
   }
   startLevelMeter();
@@ -181,8 +246,12 @@ function startListening() {
 
 function stopListening() {
   wantListening = false;
-  interruptPlayback();
-  try { recognition && recognition.stop(); } catch (_) {}
+  stopAudio();
+  speaking = false;
+  suppressUntil = 0;
+  clearTimeout(restartTimer);
+  // abort (not stop) — we don't want drain results submitted post-session.
+  try { recognition && recognition.abort(); } catch (_) {}
   setState('idle');
 }
 
@@ -202,14 +271,41 @@ let pendingAudio = [];
 let audioFormat = 'wav';
 let currentSource = null;
 
+let sinkTried = false;
+
 function getCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!sinkTried) { sinkTried = true; applyOutputSink(); }
+  }
   if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
+/**
+ * Route TTS playback to a chosen output — 'auto-headphones' picks the first
+ * audiooutput device whose label looks like headphones/earbuds. With TTS in
+ * headphones the mic physically can't hear it (no echo to fight).
+ */
+async function applyOutputSink() {
+  if (!SINK || typeof audioCtx.setSinkId !== 'function') return;
+  try {
+    let id = SINK;
+    if (SINK === 'auto-headphones') {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const hp = devs.find(d => d.kind === 'audiooutput' && /headphone|airpod|earbud|headset/i.test(d.label || ''));
+      if (!hp) { log('no headphone output found — keeping default sink'); return; }
+      id = hp.deviceId;
+    }
+    await audioCtx.setSinkId(id);
+    log(`tts output sink: ${id}`);
+  } catch (e) {
+    log(`setSinkId failed: ${e.message}`);
+  }
+}
+
 async function playBufferedAudio() {
-  if (!pendingAudio.length) return;
+  if (!pendingAudio.length) { releaseSpeechGate(); return; }
   const blob = new Blob(pendingAudio, { type: `audio/${audioFormat}` });
   pendingAudio = [];
   try {
@@ -217,14 +313,33 @@ async function playBufferedAudio() {
     playBuffer(buf);
   } catch (e) {
     log(`decode failed: ${e.message}`);
+    releaseSpeechGate();
     send({ type: 'error', error: 'tts-decode-failed' });
   }
 }
 
+/** End the speaking state: brief guard window, then re-arm recognition. */
+function endSpeaking() {
+  speaking = false;
+  suppressUntil = Date.now() + RESTART_DELAY_MS;
+  setState(wantListening ? 'listening' : 'idle');
+  send({ type: 'speak-done' });
+  scheduleRestart();
+}
+
+/** Release the gate when audio never played (empty/decode-failed stream). */
+function releaseSpeechGate() {
+  if (!speaking) return;
+  speaking = false;
+  suppressUntil = Date.now() + RESTART_DELAY_MS;
+  scheduleRestart();
+}
+
 function playBuffer(buf) {
-  // Pause recognition while speaking — avoids the mic hearing our own TTS.
+  // speaking was already set at audio-begin; reaffirm for safety.
   speaking = true;
-  try { recognition && recognition.stop(); } catch (_) {}
+  suppressUntil = Date.now() + 30000;
+  try { recognition && recognition.abort(); } catch (_) {}
   setState('speaking');
   const src = getCtx().createBufferSource();
   src.buffer = buf;
@@ -233,10 +348,7 @@ function playBuffer(buf) {
   src.onended = () => {
     if (currentSource === src) {
       currentSource = null;
-      speaking = false;
-      if (wantListening) { try { recognition.start(); } catch (_) {} }
-      setState(wantListening ? 'listening' : 'idle');
-      send({ type: 'speak-done' });
+      endSpeaking();
     }
   };
   src.start();
@@ -244,37 +356,235 @@ function playBuffer(buf) {
 
 function speakFallback(text, lang) {
   if (!text) return;
-  interruptPlayback();
+  stopAudio();
   speaking = true;
-  try { recognition && recognition.stop(); } catch (_) {}
+  suppressUntil = Date.now() + 30000;
+  try { recognition && recognition.abort(); } catch (_) {}
   setState('speaking');
   const u = new SpeechSynthesisUtterance(text);
   if (lang) u.lang = lang;
-  u.onend = u.onerror = () => {
-    speaking = false;
-    if (wantListening) { try { recognition.start(); } catch (_) {} }
-    setState(wantListening ? 'listening' : 'idle');
-    send({ type: 'speak-done' });
-  };
+  u.onend = u.onerror = () => endSpeaking();
   speechSynthesis.speak(u);
 }
 
-function interruptPlayback() {
+// ----------------------------------------------------------- filler playback
+// Pre-generated, voice-matched clips served by the voice-service over HTTP.
+// Decoded once into AudioBuffers and cached — replay latency is ~10ms, which
+// is what makes sub-250ms conversational timing possible (live TTS can't).
+const fillerBuffers = new Map(); // src -> AudioBuffer | Promise<AudioBuffer>
+
+async function decodeFiller(src) {
+  let entry = fillerBuffers.get(src);
+  if (!entry) {
+    entry = (async () => {
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`filler fetch ${res.status}`);
+      return getCtx().decodeAudioData(await res.arrayBuffer());
+    })();
+    fillerBuffers.set(src, entry);
+    entry.catch(() => fillerBuffers.delete(src)); // don't cache failures
+  }
+  return entry;
+}
+
+async function playFiller(src) {
+  if (!src) return;
+  try {
+    // Gate BEFORE awaiting decode — sound starts as soon as the buffer is ready.
+    stopAudio();
+    speaking = true;
+    suppressUntil = Date.now() + 30000;
+    try { recognition && recognition.abort(); } catch (_) {}
+    const buf = await decodeFiller(src);
+    if (!speaking) return; // interrupted while decoding
+    playBuffer(buf);
+  } catch (e) {
+    log(`filler failed: ${e.message}`);
+    releaseSpeechGate();
+  }
+}
+
+function preloadFillers(urls) {
+  for (const src of urls.slice(0, 250)) decodeFiller(src).catch(() => {});
+}
+
+/** Halt any in-flight audio without touching the speaking gate. */
+function stopAudio() {
   if (currentSource) { try { currentSource.onended = null; currentSource.stop(); } catch (_) {} currentSource = null; }
   try { speechSynthesis.cancel(); } catch (_) {}
+  pendingAudio = [];
+}
+
+/** Barge-in / server stop: halt audio, release the gate, re-arm listening. */
+function interruptPlayback() {
+  stopAudio();
   if (speaking) {
     speaking = false;
+    suppressUntil = Date.now() + RESTART_DELAY_MS;
     send({ type: 'interrupted' });
-    if (wantListening) { try { recognition.start(); } catch (_) {} setState('listening'); }
+    setState(wantListening ? 'listening' : 'idle');
+    scheduleRestart();
   }
-  pendingAudio = [];
+}
+
+// --------------------------------------------------------- realtime S2S mode
+// OpenAI Realtime over WebRTC, hosted in the page: mic + remote audio ride RTC
+// tracks, so Chrome's WebRTC AEC natively cancels the model's voice from the
+// mic — no manual gating needed. SR is paused; the model does its own VAD/STT.
+// Events flow over the 'oai-events' data channel → relayed over /voice.ws.
+let rtPc = null;
+let rtDc = null;
+let rtMic = null;
+let rtAudioEl = null;
+let rtAssistantBuf = '';
+
+let rtStarting = false;
+async function startRealtime() {
+  if (rtStarting || rtPc) { log('realtime already starting/started — ignored'); return; }
+  rtStarting = true;
+  try { return await _startRealtimeInner(); } finally { rtStarting = false; }
+}
+async function _startRealtimeInner() {
+  stopRealtime();
+  rtActive = true; // park SR for the duration of the call
+  rtPc = new RTCPeerConnection();
+  rtDc = rtPc.createDataChannel('oai-events');
+  rtDc.onmessage = (ev) => {
+    let evt; try { evt = JSON.parse(ev.data); } catch (_) { return; }
+    onRtEvent(evt);
+  };
+  // Mic selection: explicit ?mic= label substring wins; otherwise when a
+  // Bluetooth earbud mic exists it hijacks the OS default input and its
+  // 8kHz profile wrecks recognition — so we prefer the built-in mic while
+  // audio output still routes to the earbuds.
+  const rtAudioConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  try {
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    const find = (re) => inputs.find(d => re.test(d.label || ''));
+    let target = null;
+    if (MIC_PIN) target = inputs.find(d => (d.label || '').toLowerCase().includes(MIC_PIN.toLowerCase()));
+    else if (find(/airpods|bluetooth|buds|headset|earphones/i)) target = find(/built.?in|macbook|internal|microphone array/i);
+    if (target && target.deviceId) {
+      rtAudioConstraints.deviceId = { exact: target.deviceId };
+      log(`realtime mic pinned: ${target.label}`);
+    }
+  } catch (_) {}
+  rtMic = await navigator.mediaDevices.getUserMedia({ audio: rtAudioConstraints });
+  rtMic.getTracks().forEach(t => rtPc.addTrack(t, rtMic));
+  rtPc.ontrack = (ev) => {
+    rtAudioEl = document.createElement('audio');
+    rtAudioEl.autoplay = true;
+    rtAudioEl.srcObject = ev.streams[0];
+    document.body.appendChild(rtAudioEl);
+  };
+  rtPc.onconnectionstatechange = () => {
+    send({ type: 'rt-state', state: rtPc.connectionState });
+    if (rtPc.connectionState === 'failed' || rtPc.connectionState === 'disconnected') setState('error');
+  };
+
+  const offer = await rtPc.createOffer();
+  await rtPc.setLocalDescription(offer);
+  // Give ICE a beat to gather candidates before posting the offer.
+  await new Promise(r => setTimeout(r, 1200));
+
+  const res = await fetch(`${location.origin}/voice.realtime.start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: rtPc.localDescription.sdp }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.sdp) throw new Error(data.error || `HTTP ${res.status}`);
+  await rtPc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+  // Realtime owns the mic — park SpeechRecognition for the session.
+  speaking = false;
+  suppressUntil = 0;
+  try { recognition && recognition.abort(); } catch (_) {}
+  setState('talking');
+  send({ type: 'rt-state', state: 'connected' });
+  log('realtime connected');
+}
+
+function stopRealtime() {
+  rtActive = false;
+  try { rtDc && rtDc.close(); } catch (_) {}
+  try { rtPc && rtPc.close(); } catch (_) {}
+  try { rtMic && rtMic.getTracks().forEach(t => t.stop()); } catch (_) {}
+  try { rtAudioEl && rtAudioEl.remove(); } catch (_) {}
+  rtPc = rtDc = rtMic = rtAudioEl = null;
+  rtAssistantBuf = '';
+  if (wantListening) { try { recognition && recognition.start(); } catch (_) {} }
+}
+
+function rtToolResult(callId, output) {
+  if (!rtDc || rtDc.readyState !== 'open') return;
+  rtDc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'function_call_output', call_id: callId, output: String(output || 'Done.') },
+  }));
+  rtDc.send(JSON.stringify({ type: 'response.create' }));
+}
+
+// Server-pushed text (task results, proactive thoughts) → the model voices it
+// in its own words at the next response.
+function rtInject(text) {
+  if (!rtDc || rtDc.readyState !== 'open') return;
+  rtDc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: String(text) }] },
+  }));
+  rtDc.send(JSON.stringify({ type: 'response.create' }));
+}
+
+// Live context refresh (frontmost app/tab changes) — context-only item, no
+// response.create, so the model stays silent but sees fresh facts next turn.
+function rtContextUpdate(text) {
+  if (!rtDc || rtDc.readyState !== 'open' || !text) return;
+  rtDc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `[context update] ${String(text)}` }] },
+  }));
+}
+
+function onRtEvent(evt) {
+  switch (evt.type) {
+    case 'conversation.item.input_audio_transcription.completed':
+      send({ type: 'rt-transcript', role: 'user', text: evt.transcript || '' });
+      break;
+    case 'response.output_audio_transcript.delta':
+      rtAssistantBuf += evt.delta || '';
+      break;
+    case 'response.output_audio_transcript.done':
+      send({ type: 'rt-transcript', role: 'assistant', text: evt.transcript || rtAssistantBuf });
+      rtAssistantBuf = '';
+      break;
+    case 'response.function_call_arguments.done':
+      send({ type: 'rt-tool-call', call_id: evt.call_id, name: evt.name, arguments: evt.arguments });
+      break;
+    case 'input_audio_buffer.speech_started':
+      send({ type: 'rt-state', state: 'user-speaking' });
+      break;
+    case 'response.created':
+      send({ type: 'rt-state', state: 'responding' });
+      break;
+    case 'response.done':
+      send({ type: 'rt-state', state: 'listening' });
+      break;
+    case 'error':
+      send({ type: 'error', error: `realtime: ${evt.error?.message || 'unknown'}` });
+      break;
+    default:
+      break;
+  }
 }
 
 // ------------------------------------------------------------- level meter
 async function startLevelMeter() {
   if (!LEVEL_METER || startLevelMeter.done) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Constraints also prep the stream for future KWS / barge-in taps.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
     const ctx = getCtx();
     const src = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
@@ -293,6 +603,32 @@ async function startLevelMeter() {
     log(`level meter failed: ${e.message}`);
   }
 }
+
+// ------------------------------------------------- audio route detection
+// Chrome SR follows the OS *default* input — when earbuds connect, macOS
+// switches input to their 8kHz Bluetooth profile and recognition falls apart.
+// We can't pin the SR mic, but we can detect + warn so the UI hints at it
+// (realtime mode pins the built-in mic and is unaffected).
+let _btRouteWarned = false;
+async function checkAudioRoute() {
+  try {
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    const bt = inputs.find(d => /airpods|bluetooth|buds|headset|earphones/i.test(d.label || ''));
+    if (bt && !_btRouteWarned) {
+      _btRouteWarned = true;
+      send({ type: 'audio-route', device: bt.label || 'bluetooth-input' });
+      log(`bluetooth mic present: ${bt.label} — pipeline STT may degrade`);
+    } else if (!bt) {
+      _btRouteWarned = false;
+    }
+  } catch (_) {}
+}
+try {
+  if (navigator.mediaDevices?.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', checkAudioRoute);
+  }
+} catch (_) {}
+checkAudioRoute();
 
 connect();
 log('worker loaded');

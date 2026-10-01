@@ -36,7 +36,22 @@ const HIDDEN_ARGS = [
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-component-update',
+  '--test-type', // suppresses the "unsupported flag --no-sandbox" infobar
 ];
+
+/**
+ * Launch args computed at start() time so env loaded by dotenv is visible.
+ * VOICE_FORCE_SYSTEM_AEC=1 → ForceEnableSystemAec maps the mic onto macOS
+ * Voice Processing I/O — device-level AEC that cancels ALL speaker output
+ * (including our own TTS playback). Experimental for SpeechRecognition.
+ */
+function buildArgs() {
+  const args = [...HIDDEN_ARGS];
+  if (process.env.VOICE_FORCE_SYSTEM_AEC === '1') {
+    args.push('--enable-features=ForceEnableSystemAec');
+  }
+  return args;
+}
 
 class CompanionDriver {
   /**
@@ -56,6 +71,23 @@ class CompanionDriver {
   }
 
   /**
+   * Park the worker window in the Dock. macOS clamps offscreen
+   * position/size args back into view — 'minimized' is the only hide
+   * the window manager reliably honors. Audio capture + SpeechRecognition
+   * keep running minimized (no occlusion suspension for audio on macOS).
+   */
+  async _hideWindow() {
+    if (!this.page || this.page.isClosed()) return;
+    try {
+      const cdp = await this.context.newCDPSession(this.page);
+      const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    } catch (err) {
+      logger.warn('[VoiceDriver] window minimize failed (non-fatal)', { error: err.message });
+    }
+  }
+
+  /**
    * Launch (or reuse) the hidden Chrome and navigate to the worker page.
    * Resolves once the page has loaded; the WS 'ready' handshake is
    * confirmed separately by server.cjs.
@@ -66,6 +98,7 @@ class CompanionDriver {
       if (!this.page.url().startsWith(this.workerUrl())) {
         await this.page.goto(this.workerUrl(), { waitUntil: 'domcontentloaded' });
       }
+      await this._hideWindow(); // re-park in case the window was restored
       return { ok: true, reused: true };
     }
     if (this.starting) throw new Error('launch already in progress');
@@ -77,7 +110,7 @@ class CompanionDriver {
         viewport: { width: 1, height: 1 },
         permissions: ['microphone'],
         ignoreDefaultArgs: ['--enable-automation'],
-        args: HIDDEN_ARGS,
+        args: buildArgs(),
       });
       this.browser = this.context.browser();
       this.browser.on('disconnected', () => {
@@ -95,6 +128,7 @@ class CompanionDriver {
         this.onDisconnect('page-closed');
       });
       await this.page.goto(this.workerUrl(), { waitUntil: 'domcontentloaded' });
+      await this._hideWindow();
       logger.info('[VoiceDriver] Hidden Chrome worker launched', { url: this.workerUrl() });
       return { ok: true, reused: false };
     } finally {
