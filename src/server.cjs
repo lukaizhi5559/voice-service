@@ -55,6 +55,8 @@ const WORKER_HTML = path.join(__dirname, '..', 'public', 'voice-worker.html');
 // ── Session / worker state ────────────────────────────────────────────────────
 let sessionWanted = false;
 let sessionMode = 'pipeline'; // 'pipeline' (Chrome SR + TTS) | 'realtime' (S2S)
+let _lastSelectionCtx = null; // { armed, captured, sourceApp, excerpt } pushed by main
+let _lastScreenCtx = null;    // { appName, windowTitle, url, text, capturedAt } pushed by monitor
 let workerSocket = null;   // active WS connection from the worker page
 let workerReady = false;
 let workerActivated = false; // 'session:active' already sent to THIS worker page
@@ -372,9 +374,28 @@ async function buildRealtimeContext() {
     lastRtContextKey = `${app.appName}|${app.windowTitle}|${app.url || ''}`;
     block += `Right now the user's ${describeActiveApp(app)} (snapshot from call start — silent refreshes arrive during the call).\n\n`;
   }
-  if (screen) {
-    lastRtScreenKey = `${screen.capturedAt}|${screen.appName}`;
-    block += `Screen content OCR captured ${Math.round((screen.ageMs || 0) / 1000)}s ago on ${screen.appName}: "${screen.text.slice(0, 800)}"\n\n`;
+  // Prefer a monitor-pushed capture when it's clearly newer than the DB row —
+  // pushes arrive before LiteParser+insert finish, so after an app/tab switch
+  // the push is often the freshest screen text available at call start.
+  const pushAgeMs = _lastScreenCtx
+    ? Date.now() - new Date(_lastScreenCtx.capturedAt).getTime()
+    : Infinity;
+  const usePush = !!_lastScreenCtx && pushAgeMs < 60000 &&
+    (!screen || pushAgeMs < (screen.ageMs || 0) - 2000);
+  const scr = usePush
+    ? { text: _lastScreenCtx.text, appName: _lastScreenCtx.appName, ageMs: pushAgeMs,
+        key: `push|${_lastScreenCtx.capturedAt}|${_lastScreenCtx.appName}` }
+    : screen && { ...screen, key: `${screen.capturedAt}|${screen.appName}` };
+  if (scr) {
+    lastRtScreenKey = scr.key;
+    block += `Screen content OCR captured ${Math.round((scr.ageMs || 0) / 1000)}s ago on ${scr.appName}: "${scr.text.slice(0, 800)}"\n\n`;
+  }
+  if (_lastSelectionCtx?.armed || _lastSelectionCtx?.captured) {
+    const s = _lastSelectionCtx;
+    const what = s.excerpt
+      ? `text selected in ${s.sourceApp || 'another app'}: "${s.excerpt}"`
+      : `a text selection in ${s.sourceApp || 'another app'}`;
+    block += `The user has ${what} — "this/that" questions likely refer to it; run_thinkdrop_task receives the full text automatically.\n\n`;
   }
   if (voiceHistory.length) {
     block += 'Recent conversation with this user:\n' +
@@ -397,7 +418,7 @@ async function buildRealtimeContext() {
 let rtContextTimer = null;
 let lastRtContextKey = null;
 let lastRtScreenKey = null;
-const RT_CONTEXT_MS = parseInt(process.env.VOICE_RT_CONTEXT_MS || '45000', 10);
+const RT_CONTEXT_MS = parseInt(process.env.VOICE_RT_CONTEXT_MS || '15000', 10);
 
 function startRtContextRefresh() {
   stopRtContextRefresh();
@@ -919,6 +940,53 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/voice.realtime.stop') {
       sendToWorker({ type: 'realtime', active: false });
+      return json(200, { ok: true });
+    }
+
+    // ── Selection context — main pushes arm/capture/disarm so the live call ──
+    // knows a highlighted-text selection exists ("what is this" refers to it).
+    if (req.method === 'POST' && url.pathname === '/voice.context') {
+      const body = await readBody();
+      _lastSelectionCtx = {
+        armed: !!body.armed,
+        captured: !!body.captured,
+        sourceApp: body.sourceApp || null,
+        excerpt: body.excerpt ? String(body.excerpt).slice(0, 120) : null,
+      };
+      logger.info('[VoiceBridge] selection context', {
+        armed: _lastSelectionCtx.armed, captured: _lastSelectionCtx.captured,
+        app: _lastSelectionCtx.sourceApp,
+      });
+      if (sessionMode === 'realtime' && rtConnected) {
+        const s = _lastSelectionCtx;
+        const text = (s.armed || s.captured)
+          ? `Context update — the user has ${s.excerpt ? `text selected in ${s.sourceApp || 'another app'}: "${s.excerpt}"` : `a text selection in ${s.sourceApp || 'another app'}`}. "This/that" questions likely refer to it.`
+          : 'Context update — the user no longer has a text selection.';
+        sendToWorker({ type: 'rt-context', text });
+      }
+      return json(200, { ok: true });
+    }
+
+    // ── Screen OCR push — the user-memory monitor sends fresh captures the ──
+    // moment tesseract finishes (before LiteParser/DB-store), so a live call
+    // sees screen changes within seconds instead of at the next rt poll.
+    if (req.method === 'POST' && url.pathname === '/voice.screen') {
+      const body = await readBody();
+      _lastScreenCtx = {
+        appName: body.appName || null,
+        windowTitle: body.windowTitle || '',
+        url: body.url || null,
+        text: String(body.text || '').slice(0, 800),
+        capturedAt: body.capturedAt || new Date().toISOString(),
+      };
+      logger.info('[VoiceBridge] screen context push', {
+        app: _lastScreenCtx.appName, len: _lastScreenCtx.text.length,
+      });
+      // Keep the poller's key in sync so it doesn't re-push the same capture.
+      lastRtScreenKey = `push|${_lastScreenCtx.capturedAt}|${_lastScreenCtx.appName}`;
+      if (sessionMode === 'realtime' && rtConnected && _lastScreenCtx.text) {
+        sendToWorker({ type: 'rt-context', text: `Screen content update (OCR of ${_lastScreenCtx.appName}): "${_lastScreenCtx.text.slice(0, 400)}"` });
+      }
       return json(200, { ok: true });
     }
 
