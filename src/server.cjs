@@ -474,6 +474,20 @@ async function handleToolCall(msg) {
   sendToWorker({ type: 'rt-tool-result', call_id: msg.call_id, output });
 }
 
+// Deterministic backstop for lane-control speech the model answers itself
+// ("stop plan mode" narrated without a tool call). main decides whether the
+// transcript is a control phrase (same _matchPlanCheckAction as every other
+// surface); on a hit we cancel whatever response is generating and inject the
+// real outcome as a system note the model announces in its own words.
+async function controlCheck(text) {
+  const r = await axios.post(`http://localhost:${MAIN_PORT}/voice.control-check`,
+    { text }, { timeout: 8000, httpAgent: relayAgent });
+  if (!r.data?.handled) return;
+  logger.info('[VoiceBridge] control intercept', { text: String(text).slice(0, 80), output: r.data.output });
+  sendToWorker({ type: 'rt-cancel' });
+  sendToWorker({ type: 'rt-inject', text: `[system] ${r.data.output || 'Done.'}` });
+}
+
 /** Warm the worker's decode cache with everything cached for `lang` (+ en). */
 function preloadWorkerFillers(lang) {
   const m = fillers.status().manifest;
@@ -712,10 +726,17 @@ function handleWorkerMessage(msg) {
       }
       relayToMain(msg);
       break;
-    case 'rt-transcript':
+    case 'rt-transcript': {
       noteVoice(msg.role === 'user' ? 'user' : 'assistant', msg.text);
       relayToMain(msg);
+      // Control backstop — when the model answers a lane-control phrase
+      // conversationally (no tool call), the transcript still performs the
+      // real transition and the model is told the outcome.
+      if (msg.role === 'user' && sessionMode === 'realtime' && msg.text && msg.text.trim()) {
+        controlCheck(msg.text).catch(() => {});
+      }
       break;
+    }
     case 'rt-tool-call': {
       // Model called run_thinkdrop_task → route through main, feed result back.
       handleToolCall(msg).catch(err => {

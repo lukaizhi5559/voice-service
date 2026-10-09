@@ -141,6 +141,9 @@ function handleCommand(msg) {
     case 'rt-tool-result': // server resolved a function call → feed back to model
       rtToolResult(msg.call_id, msg.output);
       break;
+    case 'rt-cancel': // server-side control intercept — stop the in-flight response
+      if (rtDc && rtDc.readyState === 'open') rtDc.send(JSON.stringify({ type: 'response.cancel' }));
+      break;
     case 'rt-inject': // server-side context/thought/task-result → model speaks it
       rtInject(msg.text);
       break;

@@ -41,6 +41,14 @@ function sessionConfig(context) {
     'the task executes for real. When a running task finishes you\'ll get',
     'its result as a message — announce it naturally. If the user says to',
     'cancel or stop an active task, call cancel_current_task.',
+    'Commands about ThinkDrop ITSELF — exit/stop/leave planning or plan mode,',
+    'cancel the plan, run/approve/skip the plan, pick a numbered option on a',
+    'card — are real state changes that ONLY happen through thinkdrop_control.',
+    'Always call it; then say what its result reported. NEVER claim a mode',
+    'changed or that anything was sent/done/cancelled/completed from your own',
+    'words — only from a tool result. Tool results may start with',
+    '[app-state: …] or [system] … — that is authoritative app state; act on',
+    'it, don\'t read it aloud literally.',
     'You receive live context: the user\'s frontmost app/window/page plus an',
     'OCR text digest of what their screen shows, refreshed silently during',
     'the call — answer screen and "what am I looking at" questions from it.',
@@ -97,6 +105,25 @@ function sessionConfig(context) {
       name: 'cancel_current_task',
       description: 'Cancel/stop the currently running ThinkDrop task. Use when the user says cancel, stop it, never mind, or forget it about an active task.',
       parameters: { type: 'object', properties: {} },
+    }, {
+      type: 'function',
+      name: 'thinkdrop_control',
+      description: 'Control ThinkDrop itself — exit/stop/leave planning or plan mode, cancel the plan, run/approve/skip the pending plan, or pick a numbered option on a card. These are real state changes that ONLY take effect through this tool. Use it whenever the user asks to change ThinkDrop\'s mode or answer a pending card; never narrate the change without calling it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            enum: ['exit_planning', 'cancel_plan', 'cancel_task', 'run_plan', 'approve', 'skip', 'pick_option'],
+            description: 'The control action to perform.',
+          },
+          argument: {
+            type: 'string',
+            description: 'For pick_option: the option number or label the user chose.',
+          },
+        },
+        required: ['command'],
+      },
     }],
   };
 }
