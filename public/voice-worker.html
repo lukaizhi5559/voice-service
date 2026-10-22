@@ -99,7 +99,30 @@ function handleCommand(msg) {
     case 'session':
       sessionActive = !!msg.active;
       log(`session ${sessionActive ? 'start' : 'stop'}`);
+      pttActive = false; // a full session supersedes any parked-PTT state
       if (sessionActive) startListening(); else stopListening();
+      break;
+    case 'ptt': // ROpt-hold push-to-talk — single-shot SR, no session/LLM/TTS
+      if (msg.active) {
+        if (rtActive) { send({ type: 'error', error: 'ptt-blocked', detail: 'realtime-active' }); break; }
+        pttActive = true;
+        startLevelMeter();
+        try { recognition.start(); } catch (_) {}
+      } else if (msg.discard) {
+        pttActive = false;
+        try { recognition.abort(); } catch (_) {}
+        if (!wantListening) setState('idle');
+      } else {
+        // stop() (not abort) lets the in-flight final drain — pttActive stays
+        // set until onend so the drained result still lands on the ptt lane.
+        try { recognition.stop(); } catch (_) {}
+        if (!wantListening) setState('idle');
+      }
+      break;
+    case 'ptt-warm': // prime mic permission + the SR connection at warm-start
+      primingSR = true;
+      try { recognition.start(); } catch (_) { primingSR = false; }
+      setTimeout(() => { try { recognition.abort(); } catch (_) {} primingSR = false; }, 800);
       break;
     case 'audio-begin':
       // Gate recognition BEFORE the first audio byte is even decoded —
@@ -126,6 +149,18 @@ function handleCommand(msg) {
       break;
     case 'stop': // barge-in / abort playback
       interruptPlayback();
+      break;
+    case 'mute': // ROpt-tap mute — park SR (pipeline) or kill the mic track (S2S)
+      muted = !!msg.active;
+      if (muted) {
+        try { recognition.abort(); } catch (_) {}
+        if (rtMic) rtMic.getTracks().forEach(t => { t.enabled = false; });
+        setState('muted');
+      } else {
+        if (rtMic) rtMic.getTracks().forEach(t => { t.enabled = true; });
+        if (wantListening && !rtActive) startListening();
+        else setState(rtActive ? 'talking' : 'idle');
+      }
       break;
     case 'sleep': // server-level sleep state — SR stays alive, server drops non-wake finals
       setState(msg.active ? 'sleeping' : (wantListening ? 'listening' : 'idle'));
@@ -166,6 +201,9 @@ let restartTimer = null;
 const RESTART_DELAY_MS = 500; // let speaker ring / room reverb die before re-arming
 let currentLang = LANG;
 let rtActive = false;         // realtime owns the mic — SR stays parked
+let pttActive = false;        // ROpt-hold PTT — finals go to the ptt-final lane
+let primingSR = false;        // warm-start SR prime — suppress state/results
+let muted = false;            // ROpt-tap mute — SR parked / realtime track dead
 
 function suppressed() { return speaking || Date.now() < suppressUntil; }
 
@@ -185,7 +223,7 @@ if (SR) {
   recognition.lang = LANG;
 
   recognition.onresult = (ev) => {
-    if (!wantListening || rtActive) return; // drain after stop, or realtime owns the mic — discard
+    if ((!wantListening && !pttActive) || rtActive || muted) return; // drain after stop, realtime owns the mic, or muted — discard
     const isSuppressed = suppressed();
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -195,7 +233,7 @@ if (SR) {
         if (isSuppressed) { log(`dropped final (suppressed): ${text}`); continue; }
         const lang = detectScriptLang(text) || currentLang;
         log(`final: ${text}`);
-        send({ type: 'final', text: text.trim(), lang });
+        send(pttActive ? { type: 'ptt-final', text: text.trim(), lang } : { type: 'final', text: text.trim(), lang });
       } else {
         interim += text;
       }
@@ -204,14 +242,15 @@ if (SR) {
       if (isSuppressed) {
         // Duplex mode: forward tagged interims so the server can decide
         // barge-in vs. our own TTS echo — never auto-interrupt client-side.
-        if (DUPLEX) send({ type: 'interim', text: interim.trim(), lang: currentLang, duringSpeech: true });
+        if (DUPLEX && !pttActive) send({ type: 'interim', text: interim.trim(), lang: currentLang, duringSpeech: true });
       } else {
-        send({ type: 'interim', text: interim.trim(), lang: currentLang });
+        send(pttActive ? { type: 'ptt-interim', text: interim.trim() } : { type: 'interim', text: interim.trim(), lang: currentLang });
       }
     }
   };
   recognition.onerror = (ev) => {
     log(`sr error: ${ev.error}`);
+    if (pttActive) { send({ type: 'ptt-error', error: ev.error }); return; }
     send({ type: 'error', error: ev.error });
     if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
       wantListening = false;
@@ -219,6 +258,8 @@ if (SR) {
     }
   };
   recognition.onend = () => {
+    pttActive = false; // stop() drained — clear the PTT lane
+    if (muted) { setState('muted'); return; } // stay parked while muted
     // Chrome stops recognition on silence — keep it alive while wanted.
     if (!wantListening) { setState('idle'); return; }
     if (rtActive) return;              // realtime owns the mic — stay parked
@@ -226,13 +267,13 @@ if (SR) {
     if (Date.now() < suppressUntil) { scheduleRestart(); return; }
     try { recognition.start(); } catch (_) {}
   };
-  recognition.onstart = () => { if (!rtActive) setState('listening'); };
+  recognition.onstart = () => { if (!rtActive && !primingSR) setState('listening'); };
   // Pause / speech-boundary signals — the server's filler policy uses these
   // for backchannel placement (transition-relevance places) and aggregation.
-  recognition.onspeechstart = () => { if (!rtActive) send({ type: 'speech-event', event: 'speech-start' }); };
-  recognition.onspeechend   = () => { if (!rtActive) send({ type: 'speech-event', event: 'speech-end' }); };
-  recognition.onsoundstart  = () => { if (!rtActive) send({ type: 'speech-event', event: 'sound-start' }); };
-  recognition.onsoundend    = () => { if (!rtActive) send({ type: 'speech-event', event: 'sound-end' }); };
+  recognition.onspeechstart = () => { if (!rtActive && !pttActive) send({ type: 'speech-event', event: 'speech-start' }); };
+  recognition.onspeechend   = () => { if (!rtActive && !pttActive) send({ type: 'speech-event', event: 'speech-end' }); };
+  recognition.onsoundstart  = () => { if (!rtActive && !pttActive) send({ type: 'speech-event', event: 'sound-start' }); };
+  recognition.onsoundend    = () => { if (!rtActive && !pttActive) send({ type: 'speech-event', event: 'sound-end' }); };
 } else {
   send({ type: 'error', error: 'speech-recognition-unsupported' });
   stateEl.textContent = 'SpeechRecognition unsupported';
@@ -241,7 +282,7 @@ if (SR) {
 function startListening() {
   if (!recognition) return;
   wantListening = true;
-  if (!suppressed() && !rtActive) {
+  if (!suppressed() && !rtActive && !muted) {
     try { recognition.start(); } catch (_) {}
   }
   startLevelMeter();

@@ -60,6 +60,7 @@ let _lastScreenCtx = null;    // { appName, windowTitle, url, text, capturedAt }
 let workerSocket = null;   // active WS connection from the worker page
 let workerReady = false;
 let workerActivated = false; // 'session:active' already sent to THIS worker page
+let pttActive = false;       // ROpt-hold PTT in flight (single-shot SR, no session)
 
 // ── Voice history (context for realtime sessions + ambient gating) ───────────
 const voiceHistory = []; // [{role:'user'|'assistant', text}] — last N voice turns
@@ -176,6 +177,7 @@ const SLEEP_AFTER_MS = parseInt(process.env.VOICE_SLEEP_AFTER_MS || '90000', 10)
 const SLEEP_ENABLED = process.env.VOICE_SLEEP !== '0';
 let sleeping = false;
 let sleepTimer = null;
+let muted = false; // ROpt-tap mute — mic dead (rt track / SR parked) while session stays up
 
 function armSleepTimer() {
   if (!SLEEP_ENABLED || !sessionWanted || sleeping) return;
@@ -533,6 +535,15 @@ function sendToWorker(msg) {
   }
 }
 
+/** Poll until the worker page is connected + ready (post-driver.start). */
+async function waitForWorkerReady(ms = 15000) {
+  const t0 = Date.now();
+  while (!(workerReady && workerSocket && workerSocket.readyState === 1)) {
+    if (Date.now() - t0 > ms) throw new Error('worker not ready');
+    await new Promise(r => setTimeout(r, 120));
+  }
+}
+
 // ── Bounded relay to main ─────────────────────────────────────────────────────
 // relayToMain is fire-and-forget, but UNBOUNDED posts OOM'd the service: level
 // events alone run ~10/sec and thousands of pending requests piled up whenever
@@ -544,6 +555,7 @@ const RELAY_CRITICAL = new Set([
   'sleep-state', 'sleep-dropped', 'echo-dropped', 'filler-progress',
   'rt-transcript', 'rt-state', 'rt-tool-call',
   'mode', 'voice-cancel', 'audio-route', 'thought-dropped',
+  'ptt-final', 'ptt-error', 'mute-state',
 ]);
 const RELAY_MAX_INFLIGHT = 8;
 let relayInFlight = 0;
@@ -602,8 +614,16 @@ function handleWorkerMessage(msg) {
       workerReady = true;
       logger.info('[VoiceBridge] worker ready', { lang: msg.lang });
       if (sessionWanted) activateWorker();
+      // Warm-resident worker with no session — prime mic permission + the SR
+      // connection now so the first ROpt-hold PTT doesn't pay cold-start.
+      else sendToWorker({ type: 'ptt-warm' });
       relayToMain({ type: 'state', state: 'ready' });
       preloadWorkerFillers(msg.lang);
+      break;
+    case 'ptt-final':
+    case 'ptt-interim':
+    case 'ptt-error':
+      relayToMain(msg);
       break;
     case 'interim': {
       // Duplex mode: interim arrived while our TTS is playing. Similarity to
@@ -816,6 +836,8 @@ function activateWorker() {
 async function stopSession() {
   sessionWanted = false;
   workerActivated = false;
+  pttActive = false;
+  muted = false;
   if (sleeping) { sleeping = false; relayToMain({ type: 'sleep-state', sleeping: false, source: 'session-stop' }); }
   clearTimeout(sleepTimer);
   clearTimeout(rtWatchdog); rtWatchdog = null;
@@ -905,6 +927,7 @@ const server = http.createServer(async (req, res) => {
       return json(200, {
         active: sessionWanted,
         sleeping,
+        muted,
         workerReady,
         driver: driver.status(),
         provider: voiceProvider.getProviderName(),
@@ -913,8 +936,35 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/voice.session.start') {
       const body = await readBody();
+      if (body.mode === 'warm') {
+        // Resident-but-inactive warm start: hidden Chrome + WS + SR primed,
+        // NOT listening. First ROpt-hold PTT then doesn't pay Chrome cold-start.
+        const res = await driver.start();
+        return json(200, { ok: true, warm: true, ...res });
+      }
       const result = await startSession(body.mode);
       return json(200, { ok: true, mode: sessionMode, ...result });
+    }
+
+    // ── ROpt-hold PTT — single-shot Chrome SR, no session/LLM/TTS ─────────────
+    if (req.method === 'POST' && url.pathname === '/voice.ptt.start') {
+      if (sessionWanted) return json(409, { ok: false, reason: 'session-active' });
+      try {
+        if (!workerReady) await driver.start();
+        await waitForWorkerReady(15000);
+        pttActive = true;
+        sendToWorker({ type: 'ptt', active: true });
+        return json(200, { ok: true });
+      } catch (err) {
+        return json(503, { ok: false, error: err.message });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/voice.ptt.stop') {
+      const body = await readBody().catch(() => ({}));
+      pttActive = false;
+      sendToWorker({ type: 'ptt', active: false, discard: !!(body && body.discard) });
+      return json(200, { ok: true });
     }
 
     if (req.method === 'POST' && url.pathname === '/voice.session.stop') {
@@ -942,6 +992,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/voice.wake') {
       wakeUp('manual');
       return json(200, { ok: true, sleeping });
+    }
+
+    // ── ROpt-tap mute — session stays up; the worker parks SR / kills the
+    // realtime mic track. Muted state relays to main for the pill + icon. ────
+    if (req.method === 'POST' && url.pathname === '/voice.mute') {
+      const body = await readBody().catch(() => ({}));
+      muted = !!(body && body.on);
+      sendToWorker({ type: 'mute', active: muted });
+      relayToMain({ type: 'mute-state', muted });
+      logger.info('[VoiceBridge] mute', { muted });
+      return json(200, { ok: true, muted });
     }
 
     // ── Realtime S2S — SDP broker; the API key never reaches the worker ───────
