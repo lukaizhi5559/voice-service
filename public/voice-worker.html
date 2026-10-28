@@ -481,6 +481,41 @@ let rtDc = null;
 let rtMic = null;
 let rtAudioEl = null;
 let rtAssistantBuf = '';
+// Outbound messages are queued until the SCTP channel actually opens — ICE
+// 'connecting'/post-answer is NOT usable, and plain drops here lost context
+// updates + tool results that landed mid-handshake.
+let rtOutbox = [];
+
+function rtSend(obj) {
+  if (rtDc && rtDc.readyState === 'open') {
+    try { rtDc.send(JSON.stringify(obj)); } catch (_) {}
+  } else if (rtDc) {
+    if (rtOutbox.length >= 20) rtOutbox.shift();
+    rtOutbox.push(obj);
+  }
+}
+
+function flushRtOutbox() {
+  if (!rtDc || rtDc.readyState !== 'open') return;
+  for (const m of rtOutbox) { try { rtDc.send(JSON.stringify(m)); } catch (_) {} }
+  rtOutbox = [];
+}
+
+/** Resolve once ICE gathering completes (no trickle — candidates must be in
+ * the SDP), with a timeout so slow networks don't stall forever. */
+function waitForIceGathering(pc, timeoutMs) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, timeoutMs || 1500);
+    function done() {
+      clearTimeout(timer);
+      pc.removeEventListener('icegatheringstatechange', onChange);
+      resolve();
+    }
+    function onChange() { if (pc.iceGatheringState === 'complete') done(); }
+    pc.addEventListener('icegatheringstatechange', onChange);
+  });
+}
 
 let rtStarting = false;
 async function startRealtime() {
@@ -489,10 +524,17 @@ async function startRealtime() {
   try { return await _startRealtimeInner(); } finally { rtStarting = false; }
 }
 async function _startRealtimeInner() {
-  stopRealtime();
-  rtActive = true; // park SR for the duration of the call
+  stopRealtime(false); // tear down any prior PC without reviving SR
+  rtActive = true;     // park SR for the duration of the call
+  try { recognition && recognition.abort(); } catch (_) {} // free the mic now, not post-connect
   rtPc = new RTCPeerConnection();
   rtDc = rtPc.createDataChannel('oai-events');
+  rtDc.onopen = () => {
+    flushRtOutbox();
+    // 'connected' now means "server can push" — queued context/results land.
+    send({ type: 'rt-state', state: 'connected' });
+    log('realtime data channel open');
+  };
   rtDc.onmessage = (ev) => {
     let evt; try { evt = JSON.parse(ev.data); } catch (_) { return; }
     onRtEvent(evt);
@@ -528,8 +570,9 @@ async function _startRealtimeInner() {
 
   const offer = await rtPc.createOffer();
   await rtPc.setLocalDescription(offer);
-  // Give ICE a beat to gather candidates before posting the offer.
-  await new Promise(r => setTimeout(r, 1200));
+  // No trickle — the offer must carry gathered candidates, but don't burn a
+  // fixed sleep: resolve the moment gathering completes (cap 1.5s).
+  await waitForIceGathering(rtPc, 1500);
 
   const res = await fetch(`${location.origin}/voice.realtime.start`, {
     method: 'POST',
@@ -539,16 +582,15 @@ async function _startRealtimeInner() {
   const data = await res.json();
   if (!res.ok || !data.sdp) throw new Error(data.error || `HTTP ${res.status}`);
   await rtPc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
-  // Realtime owns the mic — park SpeechRecognition for the session.
+  // Remote is set; the call signals 'connected' once the data channel opens
+  // (rtDc.onopen above) — not before, so server pushes can't die mid-handshake.
   speaking = false;
   suppressUntil = 0;
-  try { recognition && recognition.abort(); } catch (_) {}
   setState('talking');
-  send({ type: 'rt-state', state: 'connected' });
-  log('realtime connected');
+  log('realtime answer applied — waiting for data channel');
 }
 
-function stopRealtime() {
+function stopRealtime(resume = true) {
   rtActive = false;
   try { rtDc && rtDc.close(); } catch (_) {}
   try { rtPc && rtPc.close(); } catch (_) {}
@@ -556,37 +598,62 @@ function stopRealtime() {
   try { rtAudioEl && rtAudioEl.remove(); } catch (_) {}
   rtPc = rtDc = rtMic = rtAudioEl = null;
   rtAssistantBuf = '';
-  if (wantListening) { try { recognition && recognition.start(); } catch (_) {} }
+  rtOutbox = [];
+  rtPendingCalls.clear();
+  clearTimeout(rtDeferredCreate); rtDeferredCreate = null;
+  rtUserSpeaking = false;
+  if (resume && wantListening && !muted) { try { recognition && recognition.start(); } catch (_) {} }
 }
 
+// Barge-in truncates any response started while the user is talking — defer
+// the response.create until speech stops (3s cap so a chatty user can't eat
+// a tool result entirely).
+let rtUserSpeaking = false;
+let rtDeferredCreate = null;
+function rtRequestResponse() {
+  clearTimeout(rtDeferredCreate); rtDeferredCreate = null;
+  if (rtUserSpeaking) {
+    rtDeferredCreate = setTimeout(() => {
+      rtDeferredCreate = null;
+      rtSend({ type: 'response.create' });
+    }, 3000);
+    return;
+  }
+  rtSend({ type: 'response.create' });
+}
+
+// Function calls whose arguments stream is cut off mid-generation (user
+// barge-in) never reach '.done' — they evaporate while the model believes
+// it dispatched (observed: "Sit tight" + nothing running for minutes).
+// Track in-flight calls so response.done/cancelled can report the drop.
+const rtPendingCalls = new Set();
+
 function rtToolResult(callId, output) {
-  if (!rtDc || rtDc.readyState !== 'open') return;
-  rtDc.send(JSON.stringify({
+  rtSend({
     type: 'conversation.item.create',
     item: { type: 'function_call_output', call_id: callId, output: String(output || 'Done.') },
-  }));
-  rtDc.send(JSON.stringify({ type: 'response.create' }));
+  });
+  rtRequestResponse();
 }
 
 // Server-pushed text (task results, proactive thoughts) → the model voices it
 // in its own words at the next response.
 function rtInject(text) {
-  if (!rtDc || rtDc.readyState !== 'open') return;
-  rtDc.send(JSON.stringify({
+  rtSend({
     type: 'conversation.item.create',
     item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: String(text) }] },
-  }));
-  rtDc.send(JSON.stringify({ type: 'response.create' }));
+  });
+  rtRequestResponse();
 }
 
 // Live context refresh (frontmost app/tab changes) — context-only item, no
 // response.create, so the model stays silent but sees fresh facts next turn.
 function rtContextUpdate(text) {
-  if (!rtDc || rtDc.readyState !== 'open' || !text) return;
-  rtDc.send(JSON.stringify({
+  if (!text) return;
+  rtSend({
     type: 'conversation.item.create',
     item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `[context update] ${String(text)}` }] },
-  }));
+  });
 }
 
 function onRtEvent(evt) {
@@ -601,16 +668,36 @@ function onRtEvent(evt) {
       send({ type: 'rt-transcript', role: 'assistant', text: evt.transcript || rtAssistantBuf });
       rtAssistantBuf = '';
       break;
+    case 'response.function_call_arguments.delta':
+      if (evt.call_id) rtPendingCalls.add(evt.call_id);
+      break;
     case 'response.function_call_arguments.done':
+      if (evt.call_id) rtPendingCalls.delete(evt.call_id);
       send({ type: 'rt-tool-call', call_id: evt.call_id, name: evt.name, arguments: evt.arguments });
       break;
     case 'input_audio_buffer.speech_started':
+      rtUserSpeaking = true;
       send({ type: 'rt-state', state: 'user-speaking' });
+      break;
+    case 'input_audio_buffer.speech_stopped':
+      rtUserSpeaking = false;
+      if (rtDeferredCreate) {
+        clearTimeout(rtDeferredCreate); rtDeferredCreate = null;
+        rtSend({ type: 'response.create' });
+      }
       break;
     case 'response.created':
       send({ type: 'rt-state', state: 'responding' });
       break;
+    case 'response.cancelled':
     case 'response.done':
+      if (rtPendingCalls.size) {
+        // The user talked over the model mid-tool-call — the call evaporated
+        // server-side while the model believes it dispatched. Tell the
+        // bridge so it can prompt an immediate re-issue.
+        send({ type: 'rt-tool-call-dropped', call_ids: [...rtPendingCalls] });
+        rtPendingCalls.clear();
+      }
       send({ type: 'rt-state', state: 'listening' });
       break;
     case 'error':

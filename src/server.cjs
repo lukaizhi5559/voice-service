@@ -57,6 +57,7 @@ let sessionWanted = false;
 let sessionMode = 'pipeline'; // 'pipeline' (Chrome SR + TTS) | 'realtime' (S2S)
 let _lastSelectionCtx = null; // { armed, captured, sourceApp, excerpt } pushed by main
 let _lastScreenCtx = null;    // { appName, windowTitle, url, text, capturedAt } pushed by monitor
+let _lastStaleNoteAt = 0;     // last time the model was told its screen digest is stale
 let workerSocket = null;   // active WS connection from the worker page
 let workerReady = false;
 let workerActivated = false; // 'session:active' already sent to THIS worker page
@@ -371,7 +372,11 @@ async function fetchRecentScreenText(maxAgeSeconds = 120) {
 
 async function buildRealtimeContext() {
   let block = '';
-  const [app, screen] = await Promise.all([fetchActiveAppContext(), fetchRecentScreenText(300)]);
+  const [app, screen, tasksRes] = await Promise.all([
+    fetchActiveAppContext(),
+    fetchRecentScreenText(300),
+    axios.get(`http://localhost:${COMMS_PORT}/tasks`, { timeout: 800, httpAgent: relayAgent }).catch(() => null),
+  ]);
   if (app) {
     lastRtContextKey = `${app.appName}|${app.windowTitle}|${app.url || ''}`;
     block += `Right now the user's ${describeActiveApp(app)} (snapshot from call start — silent refreshes arrive during the call).\n\n`;
@@ -404,8 +409,7 @@ async function buildRealtimeContext() {
       voiceHistory.map(m => `${m.role === 'user' ? 'User' : 'You'}: ${m.text}`).join('\n') + '\n\n';
   }
   try {
-    const r = await axios.get(`http://localhost:${COMMS_PORT}/tasks`, { timeout: 800, httpAgent: relayAgent });
-    const tasks = (r.data?.tasks || []).slice(-8);
+    const tasks = (tasksRes?.data?.tasks || []).slice(-8);
     if (tasks.length) {
       block += 'Recent ThinkDrop tasks (visible to the user):\n' +
         tasks.map(t => `- [${t.status || '?'}] ${(t.prompt || t.sub_prompt || '').slice(0, 80)}`).join('\n');
@@ -454,9 +458,36 @@ function stopRtContextRefresh() {
   lastRtScreenKey = null;
 }
 
+/** Selection-state phrasing shared by /voice.context and pushLiveContext. */
+function selectionContextText(s) {
+  return (s.armed || s.captured)
+    ? `Context update — the user has ${s.excerpt ? `text selected in ${s.sourceApp || 'another app'}: "${s.excerpt}"` : `a text selection in ${s.sourceApp || 'another app'}`}. "This/that" questions likely refer to it.`
+    : 'Context update — the user no longer has a text selection.';
+}
+
+/** Re-deliver the latest selection + screen snapshots to a (re)connected call.
+ * Updates pushed before the data channel opened never arrived, and the baked
+ * session config can predate the selection — replay so the model works off
+ * the freshest state instead of stale voice history. */
+function pushLiveContext(reason) {
+  if (sessionMode !== 'realtime' || !rtConnected) return;
+  const s = _lastSelectionCtx;
+  if (s && (s.armed || s.captured)) {
+    sendToWorker({ type: 'rt-context', text: selectionContextText(s) });
+    logger.info('[VoiceBridge] pushed selection context', { reason, armed: s.armed, captured: s.captured });
+  }
+  if (_lastScreenCtx && _lastScreenCtx.text) {
+    sendToWorker({ type: 'rt-context', text: `Screen content update (OCR of ${_lastScreenCtx.appName}): "${_lastScreenCtx.text.slice(0, 400)}"` });
+    logger.info('[VoiceBridge] pushed screen context', { reason, app: _lastScreenCtx.appName });
+  }
+}
+
 function enterRealtime(lang) {
   if (!realtime.isAvailable()) { playFiller('no', lang); return; }
   sessionMode = 'realtime';
+  // rtConnected/rtDiscTimer deliberately untouched — a mid-call "talk mode"
+  // is a no-op in the worker and a pending disconnect-grace timer still
+  // applies to the same live call.
   clearTimeout(sleepTimer);            // realtime owns pacing
   clearTimeout(ambientTimer); ambientTimer = null;
   clearTimeout(turnTimer); turnTimer = null; turnBuffer = [];
@@ -466,10 +497,43 @@ function enterRealtime(lang) {
   logger.info('[VoiceBridge] talk mode on (spoken)');
 }
 
+/** gpt-realtime sometimes emits literal control chars (raw newlines) inside
+ * argument string values — raw JSON.parse throws, the call silently drops,
+ * and the model re-fires the same tool (observed: duplicate Athena search
+ * dispatches 30s apart). Escape control chars inside string literals and
+ * retry before giving up. */
+function parseToolArgs(raw) {
+  const s = String(raw || '{}');
+  try { return JSON.parse(s); } catch (_) {}
+  let out = '', inStr = false, esc = false;
+  for (const ch of s) {
+    if (esc) { out += ch; esc = false; continue; }
+    if (ch === '\\') { out += ch; esc = true; continue; }
+    if (ch === '"') inStr = !inStr;
+    if (inStr && ch === '\t') { out += '\\t'; continue; }
+    if (inStr && (ch === '\n' || ch === '\r')) { out += '\\n'; continue; }
+    out += ch;
+  }
+  try { return JSON.parse(out); } catch (_) {}
+  // Last resort — pull the instruction string even from truncated or
+  // quote-broken args (model emitted unescaped quotes / cut off mid-string).
+  const m = s.match(/"instruction"\s*:\s*"((?:[^"\\]|\\[\s\S])*)"?/);
+  if (m && m[1]) {
+    logger.warn('[VoiceBridge] tool args repaired via regex extract', { preview: s.slice(0, 200) });
+    return { instruction: m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') };
+  }
+  return null;
+}
+
 /** Route a realtime function call to ThinkDrop main and feed the answer back. */
 async function handleToolCall(msg) {
-  logger.info('[VoiceBridge] tool call', { name: msg.name });
-  const args = JSON.parse(msg.arguments || '{}');
+  const args = parseToolArgs(msg.arguments);
+  if (!args) throw new Error(`unparseable tool arguments: ${String(msg.arguments || '').slice(0, 120)}`);
+  logger.info('[VoiceBridge] tool call', {
+    name: msg.name,
+    instruction: args.instruction ? String(args.instruction).slice(0, 80) : undefined,
+    command: args.command,
+  });
   const r = await axios.post(`http://localhost:${MAIN_PORT}/voice.tool`,
     { name: msg.name, args }, { timeout: 30000, httpAgent: relayAgent });
   const output = r.data?.output || 'Done.';
@@ -523,6 +587,8 @@ const driver = new CompanionDriver({
     workerReady = false;
     workerSocket = null;
     workerActivated = false;
+    rtConnected = false;            // worker death = call death
+    clearTimeout(rtDiscTimer); rtDiscTimer = null;
     clearTimeout(sleepTimer); // no worker, nothing to sleep
     relayToMain({ type: 'state', state: 'disconnected', reason });
   },
@@ -731,18 +797,36 @@ function handleWorkerMessage(msg) {
       break;
     case 'rt-state':
       if (msg.state === 'connected') {
+        // The worker now reports this from rtDc.onopen — pushes actually land.
+        // A stray 'connected' after fallback/stop must not resurrect the lane.
+        if (!sessionWanted || sessionMode !== 'realtime') { relayToMain(msg); break; }
+        const firstConnect = !rtConnected;
         clearTimeout(rtWatchdog); rtWatchdog = null;
+        clearTimeout(rtDiscTimer); rtDiscTimer = null; // recovered inside grace
         rtConnected = true;
-        sessionMode = 'realtime';
         clearTimeout(sleepTimer); // realtime owns pacing
         startRtContextRefresh();  // keep the frontmost-app snapshot live
         relayToMain({ type: 'mode', mode: 'realtime' });
+        // Anything pushed before dc-open never arrived — replay the freshest
+        // selection/screen snapshots so the model isn't working off a stale
+        // (or absent) call-start picture. ICE + dc-open can both report
+        // 'connected' — only push on the first transition.
+        if (firstConnect) pushLiveContext('connect');
       } else if (msg.state === 'failed' && sessionWanted && sessionMode === 'realtime') {
         fallbackToPipeline('rt-failed');
-      } else if (msg.state === 'disconnected' && !rtConnected && sessionWanted && sessionMode === 'realtime') {
-        // ICE 'disconnected' is often transient mid-connect — only fall back
-        // if we never got 'connected' in the first place.
-        fallbackToPipeline('rt-never-connected');
+      } else if (msg.state === 'disconnected' && sessionWanted && sessionMode === 'realtime') {
+        if (!rtConnected) {
+          // ICE 'disconnected' is often transient mid-connect — only fall back
+          // if we never got 'connected' in the first place.
+          fallbackToPipeline('rt-never-connected');
+        } else if (!rtDiscTimer) {
+          // Mid-call ICE drop: usually a transient flap — give it a grace
+          // window, then leave realtime rather than sitting on a dead call.
+          rtDiscTimer = setTimeout(() => {
+            rtDiscTimer = null;
+            if (sessionWanted && sessionMode === 'realtime') fallbackToPipeline('ice-disconnected');
+          }, RT_DISCONNECT_GRACE_MS);
+        }
       }
       relayToMain(msg);
       break;
@@ -754,6 +838,18 @@ function handleWorkerMessage(msg) {
       // real transition and the model is told the outcome.
       if (msg.role === 'user' && sessionMode === 'realtime' && msg.text && msg.text.trim()) {
         controlCheck(msg.text).catch(() => {});
+        // Staleness signal — screen pushes are monitor-cadence and can be
+        // minutes old; the model otherwise answers "what's on screen" from a
+        // stale digest instead of handing off (observed: answered about the
+        // Indeed page while the user was already on a different site).
+        if (rtConnected) {
+          const _ctxAge = _lastScreenCtx?.capturedAt
+            ? Date.now() - new Date(_lastScreenCtx.capturedAt).getTime() : Infinity;
+          if (_ctxAge > 20000 && Date.now() - _lastStaleNoteAt > 30000) {
+            _lastStaleNoteAt = Date.now();
+            sendToWorker({ type: 'rt-context', text: `[context note] Your screen digest is ${Math.round(_ctxAge / 1000)}s old — if this request depends on what's on screen right now, call run_thinkdrop_task rather than answering from the digest.` });
+          }
+        }
       }
       break;
     }
@@ -763,6 +859,15 @@ function handleWorkerMessage(msg) {
         logger.warn('[VoiceBridge] tool call failed', { error: err.message });
         sendToWorker({ type: 'rt-tool-result', call_id: msg.call_id, output: `Error: ${err.message}` });
       });
+      break;
+    }
+    case 'rt-tool-call-dropped': {
+      // The model's function call was cut off mid-generation by user barge-in —
+      // it believes it dispatched; nothing is running. Prompt an immediate
+      // re-issue instead of letting it sit silent (observed: a 4.5-min hang
+      // after "Sit tight").
+      logger.warn('[VoiceBridge] tool call dropped mid-generation', { callIds: msg.call_ids });
+      sendToWorker({ type: 'rt-inject', text: '[system] Your tool call was interrupted before it could run — nothing was dispatched. If the task is still wanted, call the tool again now.' });
       break;
     }
     case 'error':
@@ -784,11 +889,15 @@ function handleWorkerMessage(msg) {
 // realtime can't connect — one button, best available path.
 let rtWatchdog = null;
 let rtConnected = false; // true once the WebRTC path actually connected
+let rtDiscTimer = null;  // post-connect ICE drop grace — a flap recovers silently
 const RT_CONNECT_TIMEOUT_MS = parseInt(process.env.VOICE_RT_CONNECT_MS || '12000', 10);
+const RT_DISCONNECT_GRACE_MS = parseInt(process.env.VOICE_RT_DISCONNECT_MS || '4000', 10);
 
 function fallbackToPipeline(reason) {
   if (sessionMode !== 'realtime' || !sessionWanted) return;
   clearTimeout(rtWatchdog); rtWatchdog = null;
+  clearTimeout(rtDiscTimer); rtDiscTimer = null;
+  rtConnected = false;
   stopRtContextRefresh();
   logger.warn('[VoiceBridge] realtime unavailable — falling back to pipeline', { reason });
   sessionMode = 'pipeline';
@@ -801,6 +910,7 @@ function fallbackToPipeline(reason) {
 async function startSession(mode = 'auto') {
   sessionWanted = true;
   rtConnected = false;
+  clearTimeout(rtDiscTimer); rtDiscTimer = null;
   sessionMode = (mode === 'realtime' || (mode === 'auto' && realtime.isAvailable()))
     ? 'realtime' : 'pipeline';
   relayToMain({ type: 'state', state: 'starting' }); // driver launch takes seconds
@@ -841,6 +951,8 @@ async function stopSession() {
   if (sleeping) { sleeping = false; relayToMain({ type: 'sleep-state', sleeping: false, source: 'session-stop' }); }
   clearTimeout(sleepTimer);
   clearTimeout(rtWatchdog); rtWatchdog = null;
+  clearTimeout(rtDiscTimer); rtDiscTimer = null;
+  rtConnected = false;
   stopRtContextRefresh();
   clearTimeout(ambientTimer); ambientTimer = null;
   clearTimeout(pendingThoughtTimer); pendingThoughtTimer = null;
@@ -984,6 +1096,13 @@ const server = http.createServer(async (req, res) => {
       return json(200, { ok: true });
     }
 
+    // ── Interrupt — barge-in equivalent for key holds (PTT during Talk
+    // Mode): cancel the in-flight response without ending the session. ────
+    if (req.method === 'POST' && url.pathname === '/voice.interrupt') {
+      sendToWorker({ type: 'rt-cancel' });
+      return json(200, { ok: true });
+    }
+
     if (req.method === 'POST' && url.pathname === '/voice.sleep') {
       enterSleep('manual');
       return json(200, { ok: true, sleeping });
@@ -1040,11 +1159,10 @@ const server = http.createServer(async (req, res) => {
         app: _lastSelectionCtx.sourceApp,
       });
       if (sessionMode === 'realtime' && rtConnected) {
-        const s = _lastSelectionCtx;
-        const text = (s.armed || s.captured)
-          ? `Context update — the user has ${s.excerpt ? `text selected in ${s.sourceApp || 'another app'}: "${s.excerpt}"` : `a text selection in ${s.sourceApp || 'another app'}`}. "This/that" questions likely refer to it.`
-          : 'Context update — the user no longer has a text selection.';
-        sendToWorker({ type: 'rt-context', text });
+        sendToWorker({ type: 'rt-context', text: selectionContextText(_lastSelectionCtx) });
+        logger.info('[VoiceBridge] forwarded selection context to call');
+      } else if (sessionMode === 'realtime') {
+        logger.info('[VoiceBridge] selection context held — call not connected yet');
       }
       return json(200, { ok: true });
     }
@@ -1068,6 +1186,7 @@ const server = http.createServer(async (req, res) => {
       lastRtScreenKey = `push|${_lastScreenCtx.capturedAt}|${_lastScreenCtx.appName}`;
       if (sessionMode === 'realtime' && rtConnected && _lastScreenCtx.text) {
         sendToWorker({ type: 'rt-context', text: `Screen content update (OCR of ${_lastScreenCtx.appName}): "${_lastScreenCtx.text.slice(0, 400)}"` });
+        logger.info('[VoiceBridge] forwarded screen context to call');
       }
       return json(200, { ok: true });
     }

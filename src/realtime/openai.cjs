@@ -62,6 +62,14 @@ function sessionConfig(context) {
     'run_thinkdrop_task with their actual question ("what is this about");',
     'the highlighted text attaches automatically server-side. Never turn it',
     'into a screen-description task.',
+    'When the user asks you to check, scan, or look at their screen "again",',
+    '"now", or "fresh" — your screen digest may be stale, ALWAYS hand off to',
+    'run_thinkdrop_task for a real capture instead of answering from it.',
+    'When you say you are doing something (checking, digging in, searching),',
+    'the tool call must leave in that SAME turn — never promise work ("sit',
+    'tight", "let me dig in") without a call going out. If a tool call was',
+    'interrupted, call it again right away. If a result arrives that',
+    'contradicts what you already said, correct yourself in one sentence.',
     'Answer casual questions directly yourself — but never invent a local',
     'answer (a file count, a path listing) you could hand off instead.',
     'Keep spoken answers short — this is a conversation, not an essay.',
@@ -75,12 +83,13 @@ function sessionConfig(context) {
         // Server-side VAD — the model decides turn-taking, including
         // interruptions (that's the full-duplex magic). create_response +
         // interrupt_response are explicit so the model answers on turn end
-        // and yields when the user talks over it (barge-in).
+        // and yields when the user talks over it (barge-in). Tunable via
+        // VOICE_RT_VAD_* env knobs for timing experiments.
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 700,
+          threshold: parseFloat(process.env.VOICE_RT_VAD_THRESHOLD || '0.5'),
+          prefix_padding_ms: parseInt(process.env.VOICE_RT_PREFIX_PAD_MS || '300', 10),
+          silence_duration_ms: parseInt(process.env.VOICE_RT_VAD_SILENCE_MS || '700', 10),
           create_response: true,
           interrupt_response: true,
         },
