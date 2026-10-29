@@ -185,6 +185,15 @@ function handleCommand(msg) {
     case 'rt-context': // silent live-context refresh — context item, no response
       rtContextUpdate(msg.text);
       break;
+    case 'ambient-start': // audio journal — system-audio capture
+      ambientStart(msg.engine).catch(e => {
+        log(`ambient start failed: ${e.message}`);
+        send({ type: 'error', error: 'ambient-start-failed', detail: String(e.message || e) });
+      });
+      break;
+    case 'ambient-stop':
+      ambientStop();
+      break;
     case 'ping':
       send({ type: 'pong' });
       break;
@@ -760,6 +769,89 @@ try {
   }
 } catch (_) {}
 checkAudioRoute();
+
+// ------------------------------------------------- ambient audio capture
+// getDisplayMedia system audio (macOS ≥14.2 + Chrome ≥141) → MediaRecorder →
+// POST /voice.audio.chunk. Recording runs only while audio energy is present
+// (VAD-segmented bursts) so each uploaded blob is a complete standalone webm —
+// a MediaRecorder timeslice fragment has no init segment and won't decode.
+// Bursts recorded while ThinkDrop itself is speaking are dropped — own TTS
+// re-enters via system audio otherwise.
+let ambStream = null, ambRecorder = null, ambSrc = null, ambAnalyser = null;
+let ambVad = null, ambChunks = [], ambRecording = false, ambSilenceMs = 0;
+let ambRecStart = 0, ambEnergy = 0;
+const AMB_ENERGY_ON = 0.012;      // RMS threshold — below this counts as silence
+const AMB_SILENCE_CLOSE = 1400;   // ms of silence ending a burst
+const AMB_MAX_BURST = 30000;      // cap per uploaded blob
+const AMB_MIN_BLOB = 800;         // bytes — drops clicks/door-thuds
+
+async function ambientStart(engine) {
+  if (ambRecorder) return;
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: { displaySurface: 'monitor', width: 2, height: 2, frameRate: 1 },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    selfBrowserSurface: 'exclude',
+    surfaceSwitching: 'exclude',
+    systemAudio: 'include',
+    monitorTypeSurfaces: 'include',
+  });
+  stream.getVideoTracks().forEach(t => t.stop()); // audio-only need
+  const audioTracks = stream.getAudioTracks();
+  if (!audioTracks.length) { stream.getTracks().forEach(t => t.stop()); throw new Error('no system audio track'); }
+  const audioStream = new MediaStream(audioTracks);
+  audioTracks[0].onended = () => ambientStop(); // capture revoked via Chrome UI
+
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume().catch(() => {});
+  ambSrc = audioCtx.createMediaStreamSource(audioStream);
+  ambAnalyser = audioCtx.createAnalyser();
+  ambAnalyser.fftSize = 512;
+  ambSrc.connect(ambAnalyser);
+  const buf = new Uint8Array(ambAnalyser.fftSize);
+
+  ambRecorder = new MediaRecorder(audioStream, { mimeType: 'audio/webm;codecs=opus' });
+  ambRecorder.ondataavailable = (e) => { if (e.data && e.data.size) ambChunks.push(e.data); };
+  ambRecorder.onstop = () => {
+    const blob = new Blob(ambChunks.splice(0), { type: 'audio/webm' });
+    if (blob.size >= AMB_MIN_BLOB && !speaking) {
+      fetch('/voice.audio.chunk', {
+        method: 'POST',
+        headers: { 'X-Ambient-Engine': engine || 'groq', 'X-Ambient-Energy': String(ambEnergy) },
+        body: blob,
+      }).catch(() => {});
+    }
+  };
+
+  ambVad = setInterval(() => {
+    ambAnalyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+    ambEnergy = Math.sqrt(sum / buf.length);
+    const talking = ambEnergy > AMB_ENERGY_ON;
+    const now = Date.now();
+    if (talking && !ambRecording && !speaking) {
+      ambChunks = []; ambRecStart = now; ambSilenceMs = 0;
+      try { ambRecorder.start(); ambRecording = true; } catch (_) {}
+    } else if (ambRecording) {
+      ambSilenceMs = talking ? 0 : ambSilenceMs + 250;
+      if (ambSilenceMs >= AMB_SILENCE_CLOSE || now - ambRecStart >= AMB_MAX_BURST || speaking) {
+        try { ambRecorder.stop(); } catch (_) {}
+        ambRecording = false;
+      }
+    }
+  }, 250);
+  ambStream = stream;
+  log('ambient capture started');
+}
+
+function ambientStop() {
+  if (ambVad) { clearInterval(ambVad); ambVad = null; }
+  if (ambRecorder) { try { if (ambRecorder.state !== 'inactive') ambRecorder.stop(); } catch (_) {} ambRecorder = null; }
+  if (ambSrc) { try { ambSrc.disconnect(); } catch (_) {} ambSrc = null; }
+  ambAnalyser = null; ambRecording = false; ambChunks = [];
+  if (ambStream) { ambStream.getTracks().forEach(t => t.stop()); ambStream = null; }
+  log('ambient capture stopped');
+}
 
 connect();
 log('worker loaded');

@@ -31,6 +31,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const axios = require('axios');
@@ -646,6 +647,33 @@ function sendAudioToWorker(buf) {
   }
 }
 
+// ── Ambient journal transcription ───────────────────────────────────────────
+// Engine routing comes from the audio journal's verdict: 'local' → existing
+// media.transcribe skill (calls, private); 'groq' → provider chain (media);
+// 'none' → skip. Segments forward to memory-service /audio.segment.
+const MEMORY_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://127.0.0.1:3001';
+const COMMAND_SERVICE_URL = process.env.COMMAND_SERVICE_URL || 'http://127.0.0.1:3002';
+const AMBIENT_LOCAL_MODEL = process.env.AMBIENT_LOCAL_MODEL || 'base';
+
+async function transcribeAmbientChunk(tmpFile, buf, engine) {
+  if (engine === 'none') return '';
+  if (engine === 'local') {
+    const r = await axios.post(`${COMMAND_SERVICE_URL}/command.automate`, {
+      payload: { skill: 'media.transcribe', args: { path: tmpFile, model: AMBIENT_LOCAL_MODEL, timeoutMs: 120000 } },
+    }, { timeout: 130000 });
+    const d = r.data && r.data.data;
+    if (d && d.ok && d.transcript) return String(d.transcript).trim();
+    throw new Error((d && d.error) || 'media.transcribe returned no transcript');
+  }
+  const r = await voiceProvider.transcribe({ audioBase64: buf.toString('base64'), format: 'webm' });
+  return String((r && r.text) || '').trim();
+}
+
+function postAudioSegment(seg) {
+  axios.post(`${MEMORY_SERVICE_URL}/audio.segment`, seg, { timeout: 3000 })
+    .catch(err => logger.debug('[VoiceBridge] audio.segment forward failed', { error: err.message }));
+}
+
 /** Forward a worker event to the Electron main process (fire-and-forget). */
 // ── WebSocket server (worker page connects here) ──────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
@@ -1246,6 +1274,47 @@ const server = http.createServer(async (req, res) => {
         return json(200, r);
       }
       return json(200, { providers: voiceProvider.listProviders() });
+    }
+
+    // ── Ambient audio capture control (audio journal) ──────────────────────
+    // memory-service's audioJournal arms/disarms capture; the hidden worker
+    // does getDisplayMedia → MediaRecorder → VAD bursts → /voice.audio.chunk.
+    if (req.method === 'POST' && url.pathname === '/voice.ambient') {
+      const body = await readBody();
+      const delivered = !!(workerSocket && workerSocket.readyState === 1);
+      sendToWorker({
+        type: body.action === 'stop' ? 'ambient-stop' : 'ambient-start',
+        engine: body.engine || 'groq',
+      });
+      if (!delivered) logger.warn('[VoiceBridge] ambient ' + (body.action || 'start') + ' — worker not connected');
+      return json(200, { ok: delivered });
+    }
+
+    // Audio bursts from the worker — binary webm/opus, VAD-segmented
+    // client-side so each blob is a complete file. Engine header selects the
+    // transcription path; text forwards to the memory-service audio journal.
+    // The temp file is always deleted — journals keep transcript, not audio.
+    if (req.method === 'POST' && url.pathname === '/voice.audio.chunk') {
+      const engine = String(req.headers['x-ambient-engine'] || 'groq');
+      const energy = parseFloat(req.headers['x-ambient-energy'] || '0') || 0;
+      const buf = await new Promise((resolve) => {
+        const chunks = [];
+        req.on('data', c => chunks.push(c));
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      if (!buf.length) return json(400, { error: 'empty chunk' });
+      const tmpFile = path.join(os.tmpdir(), `td-ambient-${Date.now()}-${Math.random().toString(36).slice(2)}.webm`);
+      try {
+        fs.writeFileSync(tmpFile, buf);
+        const text = await transcribeAmbientChunk(tmpFile, buf, engine);
+        if (text) postAudioSegment({ text, ts: Date.now(), energy });
+        return json(200, { ok: true, chars: text.length });
+      } catch (err) {
+        logger.warn('[VoiceBridge] ambient chunk failed', { error: err.message, engine, bytes: buf.length });
+        return json(200, { ok: false, error: err.message }); // 200 — no retry storm from the worker
+      } finally {
+        try { fs.unlinkSync(tmpFile); } catch (_) {}
+      }
     }
 
     json(404, { error: 'not found', path: url.pathname });

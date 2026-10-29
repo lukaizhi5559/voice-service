@@ -37,6 +37,11 @@ const HIDDEN_ARGS = [
   '--no-default-browser-check',
   '--disable-component-update',
   '--test-type', // suppresses the "unsupported flag --no-sandbox" infobar
+  // Ambient journal: auto-pick the monitor source for getDisplayMedia so the
+  // capture picker never appears (the window is offscreen — a picker would
+  // hang forever). Only takes effect when the worker actually calls it.
+  '--auto-select-desktop-capture-source=Entire Screen',
+  '--enable-usermedia-screen-capturing',
 ];
 
 /**
