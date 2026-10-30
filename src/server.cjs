@@ -652,7 +652,7 @@ function sendAudioToWorker(buf) {
 // media.transcribe skill (calls, private); 'groq' → provider chain (media);
 // 'none' → skip. Segments forward to memory-service /audio.segment.
 const MEMORY_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://127.0.0.1:3001';
-const COMMAND_SERVICE_URL = process.env.COMMAND_SERVICE_URL || 'http://127.0.0.1:3002';
+const COMMAND_SERVICE_URL = process.env.COMMAND_SERVICE_URL || 'http://127.0.0.1:3007';
 const AMBIENT_LOCAL_MODEL = process.env.AMBIENT_LOCAL_MODEL || 'base';
 
 async function transcribeAmbientChunk(tmpFile, buf, engine) {
